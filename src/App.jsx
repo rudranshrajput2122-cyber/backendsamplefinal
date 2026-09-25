@@ -115,6 +115,18 @@ export default function App() {
 
   const allDocs = useMemo(() => [...generatedDocs, ...DOCUMENTS], [generatedDocs])
 
+  const onAddDocs = useCallback((docs) => {
+    setGeneratedDocs((ds) => [...docs, ...ds])
+    logActivity(`Filed ${docs.length === 1 ? docs[0].name : `${docs.length} uploaded documents`} — classified and linked`)
+  }, [logActivity])
+
+  /* the feed grows when someone uploads a publication for analysis */
+  const [feed, setFeed] = useState(FEED)
+  const onAddFeed = useCallback((entry) => {
+    setFeed((f) => [entry, ...f])
+    logActivity(`Analysed uploaded publication "${entry.title}" — 2 filings affected`)
+  }, [logActivity])
+
   useEffect(() => {
     if (!missionOpen) return
     const close = () => setMissionOpen(false)
@@ -202,7 +214,7 @@ export default function App() {
   const section = SECTION_OF[route.view]
   const shared = {
     go, openModal: setModal, showToast, usasatStatus, ruleReady, noaaSigned,
-    starred, toggleStar, deadlines,
+    starred, toggleStar, deadlines, logActivity,
   }
 
   return (
@@ -288,8 +300,8 @@ export default function App() {
           {route.view === 'conflictDetail' && <ConflictDetail id={route.id} {...shared} />}
           {route.view === 'modules' && <ModulesView {...shared} />}
           {route.view === 'moduleDetail' && <ModuleDetail id={route.id} {...shared} />}
-          {route.view === 'documents' && <DocumentsView docs={allDocs} {...shared} />}
-          {route.view === 'feed' && <FeedView {...shared} />}
+          {route.view === 'documents' && <DocumentsView docs={allDocs} onAddDocs={onAddDocs} {...shared} />}
+          {route.view === 'feed' && <FeedView feed={feed} onAddFeed={onAddFeed} {...shared} />}
           {route.view === 'spacecraft' && <SpacecraftDetail id={route.id} {...shared} />}
           {route.view === 'settings' && <SettingsView showToast={showToast} />}
         </div>
@@ -328,7 +340,7 @@ export default function App() {
         <VersionsModal doc={allDocs.find((d) => d.id === modal.id)} onClose={closeModal} showToast={showToast} />
       )}
       {modal?.type === 'impact' && (
-        <ImpactModal entry={FEED.find((e) => e.id === modal.id)} onClose={closeModal} go={go} />
+        <ImpactModal entry={feed.find((e) => e.id === modal.id)} onClose={closeModal} go={go} />
       )}
 
       {paletteOpen && <CommandPalette go={go} onClose={() => setPaletteOpen(false)} openModal={setModal} />}

@@ -495,8 +495,10 @@ function esGain(theta, dLambda) {
   return -10
 }
 
-export function interferenceModel(conflict) {
-  const p = INTERFERENCE[conflict.id]
+export const INTERFERENCE_BASE = (conflict) => INTERFERENCE[conflict.id]
+
+export function interferenceModel(conflict, overrides) {
+  const p = { ...INTERFERENCE[conflict.id], ...overrides }
   const lambda = 0.299792458 / p.f
   const dLambda = p.dish / lambda
   const gEs = 20 * lg(dLambda) + 7.7
@@ -535,3 +537,20 @@ export function interferenceModel(conflict) {
     harmful: dailyPct > 0.03,
   }
 }
+
+/* sample files offered by each upload surface, so the demo runs without real files */
+export const UPLOAD_SAMPLES = {
+  documents: [{ name: 'Telesat_reply_2026-07-30.pdf', size: 214000, pages: 3 }],
+  rule: [{ name: 'FR_2026-16218_47CFR25_EPFD_update.pdf', size: 612000, pages: 14 }],
+  bom: [{ name: 'aurora1_bom_rev_f.xlsx', size: 486000, pages: 4 }],
+  telemetry: [{ name: 'aurora1_rf_telemetry_pass_1846.csv', size: 9400000, pages: 1 }],
+  revision: [{ name: 'aurora1_link_budget_v8.xlsx', size: 331000, pages: 6 }],
+}
+
+/* what a revised link budget changes against the filed parameters */
+export const REVISION_DIFF = [
+  { field: 'EIRP', from: '42.3 dBW', to: '42.5 dBW' },
+  { field: 'Antenna gain', from: '34 dBi', to: '34.2 dBi' },
+  { field: 'Downlink', from: '10.7–10.95 GHz', to: '10.7–10.95 GHz' },
+  { field: 'Uplink', from: '13.85–14.0 GHz', to: '13.85–14.0 GHz' },
+]

@@ -1003,3 +1003,8 @@ button.deadline-row:hover .dl-title { color: var(--a1); }
 }
 /* room for the overlap label, which sat on top of the param row above */
 .freq-viz { padding-top: 22px; }
+
+/* upload → run surfaces placed inside existing panels */
+.upload-run-title { font-size: 8.5px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--faint); margin-bottom: 14px; }
+.upload-run .dropzone.compact { padding: 24px 20px; }
+.feed-item .btn-sm { flex-shrink: 0; }

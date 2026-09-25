@@ -11,6 +11,7 @@ import {
   DOCUMENTS, FEED, SEVERITY_TAG, freqGeometry, SAMPLE_FILES, SCAN_NOISE, VALIDATION_CHECKS,
   ACTIVITY, interferenceModel,
 } from './data.js'
+import { INTERFERENCE_BASE, UPLOAD_SAMPLES, REVISION_DIFF } from './data.js'
 
 export const resolveConflictStatus = (c, usasatStatus) => (c.id === 'usasat' ? usasatStatus : c.status)
 
@@ -360,7 +361,15 @@ const estimatePages = (name, size) => {
   return Math.max(1, Math.min(320, Math.round(size / 52000)))
 }
 
-function UploadZone({ files, setFiles }) {
+function UploadZone({
+  files, setFiles,
+  samples = SAMPLE_FILES,
+  sampleLabel = 'or use AURORA-1 sample documents →',
+  prompt = 'Drop operator documentation, or click to browse',
+  hint = 'PDF, DOCX, or link-budget spreadsheets',
+  accept = '.pdf,.doc,.docx,.xls,.xlsx,.csv',
+  compact = false,
+}) {
   const [dragging, setDragging] = useState(false)
   const inputRef = useRef(null)
 
@@ -403,7 +412,7 @@ function UploadZone({ files, setFiles }) {
   return (
     <>
       <div
-        className={`dropzone${dragging ? ' dragging' : ''}${files.length ? ' compact' : ''}`}
+        className={`dropzone${dragging ? ' dragging' : ''}${files.length || compact ? ' compact' : ''}`}
         role="button"
         tabIndex={0}
         onClick={() => inputRef.current?.click()}
@@ -413,13 +422,13 @@ function UploadZone({ files, setFiles }) {
         onDrop={onDrop}
       >
         <div className="dz-glyph">⇪</div>
-        {dragging ? 'Release to upload' : 'Drop operator documentation, or click to browse'}
-        <div style={{ fontSize: 11.5, marginTop: 6 }}>PDF, DOCX, or link-budget spreadsheets</div>
+        {dragging ? 'Release to upload' : prompt}
+        <div style={{ fontSize: 11.5, marginTop: 6 }}>{hint}</div>
         <input
           ref={inputRef}
           type="file"
           multiple
-          accept=".pdf,.doc,.docx,.xls,.xlsx,.csv"
+          accept={accept}
           style={{ display: 'none' }}
           onChange={(e) => { add([...e.target.files]); e.target.value = '' }}
         />
@@ -427,7 +436,7 @@ function UploadZone({ files, setFiles }) {
 
       {files.length === 0 ? (
         <div style={{ textAlign: 'center', marginTop: 14 }}>
-          <button className="btn btn-ghost" onClick={() => add(SAMPLE_FILES)}>or use AURORA-1 sample documents →</button>
+          <button className="btn btn-ghost" onClick={() => add(samples)}>{sampleLabel}</button>
         </div>
       ) : (
         <div className="file-list">
@@ -463,6 +472,67 @@ function UploadZone({ files, setFiles }) {
       )}
     </>
   )
+}
+
+/* ------------------------------------------------------------------ */
+/* Upload → agent run → result. The one pattern every "drop a file and */
+/* let Kolhar work" surface in the console shares.                      */
+/* ------------------------------------------------------------------ */
+
+export function UploadAndRun({
+  title, samples, sampleLabel, prompt, hint, accept,
+  steps, onDone, children, runTitle, again = 'Upload another', onAgain,
+}) {
+  const [files, setFiles] = useState([])
+  const [phase, setPhase] = useState('upload')
+  const [result, setResult] = useState(null)
+  const [runSteps, setRunSteps] = useState([])
+  const allParsed = files.length > 0 && files.every((f) => f.parsed)
+
+  /* start the run a beat after the last file finishes parsing */
+  useEffect(() => {
+    if (phase !== 'upload' || !allParsed) return
+    const t = setTimeout(() => { setRunSteps(steps(files)); setPhase('running') }, 450)
+    return () => clearTimeout(t)
+  }, [phase, allParsed, files, steps])
+
+  const finish = useCallback(() => {
+    setResult(onDone?.(files) ?? true)
+    setPhase('done')
+  }, [files, onDone])
+
+  const reset = () => { setFiles([]); setResult(null); setPhase('upload'); onAgain?.() }
+
+  return (
+    <div className="upload-run">
+      {title && <div className="upload-run-title">{title}</div>}
+      {phase === 'upload' && (
+        <UploadZone
+          files={files} setFiles={setFiles} samples={samples} sampleLabel={sampleLabel}
+          prompt={prompt} hint={hint} accept={accept} compact
+        />
+      )}
+      {phase === 'running' && <AgentSteps title={runTitle} steps={runSteps} onDone={finish} />}
+      {phase === 'done' && (
+        <>
+          {typeof children === 'function' ? children(result, files) : children}
+          <div style={{ marginTop: 12 }}>
+            <button className="btn btn-ghost" onClick={reset}>{again} →</button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+const fileKind = (name) => {
+  const n = name.toLowerCase()
+  if (/letter|coordination|telesat/.test(n)) return 'Coordination letter'
+  if (/itar|taa|export|bom|eccn/.test(n)) return 'Export control'
+  if (/noaa|crsra|imag/.test(n)) return 'Remote sensing'
+  if (/insur|underwrit|policy/.test(n)) return 'Insurance'
+  if (/faa|launch|450/.test(n)) return 'License package'
+  return 'Filing'
 }
 
 /* ------------------------------------------------------------------ */
@@ -673,14 +743,28 @@ export function FilingsView({ go, starred, toggleStar, noaaSigned }) {
   )
 }
 
-export function FilingDetail({ id, go, openModal, showToast, starred, toggleStar }) {
+export function FilingDetail({ id, go, openModal, showToast, starred, toggleStar, logActivity }) {
   const filing = FILINGS.find((f) => f.id === id)
   const [regenerating, setRegenerating] = useState(false)
+  const [revising, setRevising] = useState(false)
 
-  const regenerate = () => {
-    setRegenerating(true)
-    setTimeout(() => { setRegenerating(false); showToast('Filing regenerated from current parameters') }, 1500)
-  }
+  const regenerate = () => setRegenerating(true)
+  const regenSteps = useMemo(() => [
+    { text: `Loading current parameters for ${filing.ref}`, detail: `${EXTRACTED_FIELDS.length} fields · 3 amendments applied`, ms: 380 },
+    { text: 'Re-running validation against current rules', detail: `${VALIDATION_CHECKS.length} of ${VALIDATION_CHECKS.length} checks pass`, ms: 620 },
+    { text: 'Rendering filing (PDF/A-2b)', detail: 'new version v4', ms: 520 },
+  ], [filing.ref])
+  const onRegenerated = useCallback(() => {
+    setRegenerating(false)
+    showToast('Filing regenerated from current parameters')
+    logActivity?.(`Regenerated ${filing.name} — v4, all checks pass`)
+  }, [filing.name, showToast, logActivity])
+
+  const revisionSteps = useCallback((files) => [
+    ...files.map((f) => ({ text: `Extracting parameters from ${f.name}`, detail: `${f.pages} ${/\.xlsx?$/i.test(f.name) ? 'sheets' : 'pages'} read`, ms: 620 })),
+    { text: `Diffing against filed values in ${filing.ref}`, detail: '2 parameters changed · 6 unchanged', ms: 480 },
+    { text: 'Checking whether the change needs a modification filing', detail: 'EIRP +0.2 dB → minor modification, 47 CFR §25.117', ms: 520 },
+  ], [filing.ref])
 
   return (
     <div className="view">
@@ -741,7 +825,53 @@ export function FilingDetail({ id, go, openModal, showToast, starred, toggleStar
         <button className="btn btn-outline" onClick={regenerate} disabled={regenerating}>
           {regenerating ? <><span className="spinner" /> Regenerating…</> : 'Regenerate'}
         </button>
+        <button className="btn btn-outline" onClick={() => setRevising(true)} disabled={revising}>
+          Upload revised source
+        </button>
       </div>
+
+      {regenerating && (
+        <div className="panel" style={{ marginTop: 22 }}>
+          <AgentSteps title="Regenerating filing" steps={regenSteps} onDone={onRegenerated} />
+        </div>
+      )}
+
+      {revising && (
+        <div className="panel" style={{ marginTop: 22 }}>
+          <UploadAndRun
+            title="Revised source documentation"
+            samples={UPLOAD_SAMPLES.revision}
+            sampleLabel="or use link budget v8 →"
+            prompt="Drop a revised ICD, frequency plan or link budget"
+            hint="Kolhar re-extracts and diffs it against what was filed"
+            runTitle="Comparing against the filed version"
+            steps={revisionSteps}
+            onDone={() => { logActivity?.(`Diffed revised source against ${filing.ref} — 2 parameters changed`); return true }}
+            again="Close"
+            onAgain={() => setRevising(false)}
+          >
+            <table className="table" style={{ marginBottom: 14 }}>
+              <thead><tr><th>Parameter</th><th>Filed</th><th>Revised</th><th></th></tr></thead>
+              <tbody>
+                {REVISION_DIFF.map((d, i) => (
+                  <tr key={d.field} className="row-in" style={{ animationDelay: `${i * 90}ms` }}>
+                    <td className="muted">{d.field}</td>
+                    <td className="mono muted">{d.from}</td>
+                    <td className="mono" style={{ color: d.from !== d.to ? 'var(--a2)' : undefined }}>{d.to}</td>
+                    <td>{d.from !== d.to ? <Tag color="amber">Changed</Tag> : <Tag color="grey">Same</Tag>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <button
+              className="btn btn-primary"
+              onClick={() => { showToast('Modification drafted — queued for review'); logActivity?.(`Drafted minor modification for ${filing.ref} (EIRP 42.3 → 42.5 dBW)`) }}
+            >
+              Draft modification
+            </button>
+          </UploadAndRun>
+        </div>
+      )}
     </div>
   )
 }
@@ -814,7 +944,7 @@ export function ConflictsView({ usasatStatus, go }) {
   )
 }
 
-export function ConflictDetail({ id, usasatStatus, go, openModal }) {
+export function ConflictDetail({ id, usasatStatus, go, openModal, logActivity }) {
   const conflict = CONFLICTS.find((c) => c.id === id)
   const status = resolveConflictStatus(conflict, usasatStatus)
   const timeline =
@@ -847,7 +977,7 @@ export function ConflictDetail({ id, usasatStatus, go, openModal }) {
 
       <FreqViz key={conflict.id} conflict={conflict} geometry={freqGeometry(conflict.ours, conflict.theirs)} />
 
-      <InterferenceCalc key={`calc-${conflict.id}`} conflict={conflict} status={status} />
+      <InterferenceCalc key={`calc-${conflict.id}`} conflict={conflict} status={status} logActivity={logActivity} />
 
       <div className="two-col">
         <div className="panel flush">
@@ -896,10 +1026,35 @@ export function ConflictDetail({ id, usasatStatus, go, openModal }) {
 
 const CALC_MS = 4200
 
-function InterferenceCalc({ conflict, status }) {
-  const m = useMemo(() => interferenceModel(conflict), [conflict])
+const REFINE_SAMPLES = [
+  { name: 'aurora1_ephemeris_2026-07-31.oem', size: 842000, pages: 1 },
+  { name: 'ku_phased_array_pattern_meas.csv', size: 128000, pages: 1 },
+]
+
+function InterferenceCalc({ conflict, status, logActivity }) {
+  /* uploaded operator data replaces the generic geometry and pattern */
+  const [inputs, setInputs] = useState(null)
+  const [refining, setRefining] = useState(false)
+  const m = useMemo(() => interferenceModel(conflict, inputs), [conflict, inputs])
   const { p } = m
   const [runId, setRunId] = useState(0)
+
+  const refineSteps = useCallback((files) => [
+    ...files.map((f) => ({ text: `Parsing ${f.name}`, detail: /\.oem$|\.tle$|ephem/i.test(f.name) ? 'CCSDS OEM · 6 SC · 1,440 states each' : 'antenna pattern · 361 cuts, 0.5° step', ms: 520 })),
+    { text: `Propagating AURORA-1 and ${conflict.network} over 24 h`, detail: `${Math.round(p.eventsPerDay * 1.0)} in-line events found`, ms: 640 },
+    { text: 'Replacing ITU-R S.1528 reference pattern with measured pattern', detail: 'main lobe 8 % narrower than reference', ms: 420 },
+    { text: 'Recomputing I/N time series', detail: '121 samples per event', ms: 480 },
+  ], [conflict.network, p.eventsPerDay])
+
+  const onRefined = useCallback(() => {
+    const next = { thetaMin: INTERFERENCE_BASE(conflict).thetaMin * 1.45, beam: INTERFERENCE_BASE(conflict).beam * 0.92, uploaded: true }
+    const before = interferenceModel(conflict, inputs).peak.iN
+    const after = interferenceModel(conflict, next).peak.iN
+    setInputs(next)
+    setRunId((r) => r + 1)
+    logActivity?.(`Re-ran interference for ${conflict.network} with uploaded ephemeris — peak I/N ${before.toFixed(1)} → ${after.toFixed(1)} dB`)
+    return { before, after }
+  }, [conflict, inputs, logActivity])
   const [prog, setProg] = useState(0)
 
   useEffect(() => {
@@ -922,7 +1077,7 @@ function InterferenceCalc({ conflict, status }) {
     { k: 'Interferer in-band EIRP', eq: `${p.eirp} dBW + 10·log(${conflict.overlapMHz} / ${p.bwTheirs} MHz)`, v: `${m.eirpInBand.toFixed(1)} dBW` },
     { k: 'Earth-station peak gain', eq: `20·log(D/λ) + 7.7 · D = ${p.dish} m`, v: `${m.gEs.toFixed(1)} dBi` },
     { k: 'Receiver noise kTB', eq: `−228.6 + 10·log ${p.tsys} K + 10·log ${p.bwOurs} MHz`, v: `${m.kTB.toFixed(1)} dBW` },
-    { k: 'Closest separation', eq: `${m.curve.length} samples · S.465 / S.1528 patterns`, v: `${m.peak.theta.toFixed(2)}°` },
+    { k: 'Closest separation', eq: inputs ? `${m.curve.length} samples · uploaded OEM ephemeris · measured pattern` : `${m.curve.length} samples · S.465 / S.1528 patterns`, v: `${m.peak.theta.toFixed(2)}°` },
     { k: 'Peak I/N', eq: 'I − N at closest approach', v: `${sign(m.peak.iN)}${m.peak.iN.toFixed(1)} dB`, hot: m.peak.iN > -6 },
     { k: 'ΔT/T at peak', eq: '10^(I/N ÷ 10) · criterion 6 %', v: m.deltaTT >= 100 ? `${(Math.round(m.deltaTT / 10) * 10).toLocaleString()} %` : `${m.deltaTT.toFixed(2)} %`, hot: m.deltaTT > 6 },
     { k: 'C/(N+I) degradation', eq: '10·log(1 + I/N)', v: `${m.cniLoss.toFixed(2)} dB` },
@@ -953,7 +1108,7 @@ function InterferenceCalc({ conflict, status }) {
   return (
     <div className="panel calc-panel">
       <div className="panel-title">
-        Interference computation · {p.dir}
+        Interference computation · {p.dir}{inputs ? ' · operator data' : ''}
         <span className="t-right">
           <span className="mono" style={{ fontSize: 10.5, color: 'var(--faint)', letterSpacing: 0 }}>
             {done ? `computed in ${(CALC_MS / 1000 * 0.93).toFixed(2)} s` : <><span className="spinner" /> computing…</>}
@@ -1018,6 +1173,37 @@ function InterferenceCalc({ conflict, status }) {
       {done && (
         <div className={`calc-verdict${m.harmful && status !== 'Resolved' ? ' hot' : ''}`}>{verdict}</div>
       )}
+
+      {done && !refining && (
+        <div style={{ marginTop: 14 }}>
+          <button className="btn btn-ghost" onClick={() => setRefining(true)}>
+            {inputs ? 'Refine again with new data →' : 'Refine with your ephemeris / antenna pattern →'}
+          </button>
+        </div>
+      )}
+      {refining && (
+        <div style={{ marginTop: 18 }}>
+          <UploadAndRun
+            title="Operator data"
+            samples={REFINE_SAMPLES}
+            sampleLabel="or use AURORA-1 ephemeris + measured pattern →"
+            prompt="Drop ephemeris (OEM / TLE) or antenna pattern (CSV)"
+            hint="Replaces the reference geometry and ITU-R patterns in the calculation above"
+            accept=".oem,.tle,.txt,.csv,.xlsx"
+            runTitle="Refining interference inputs"
+            steps={refineSteps}
+            onDone={onRefined}
+            again="Close"
+            onAgain={() => setRefining(false)}
+          >
+            {(r) => (
+              <div className="calc-verdict">
+                Re-computed with uploaded data — peak I/N {r.before.toFixed(1)} → <strong style={{ color: 'var(--a1)', fontWeight: 400 }}>{r.after.toFixed(1)} dB</strong>. Results above now use your inputs.
+              </div>
+            )}
+          </UploadAndRun>
+        </div>
+      )}
     </div>
   )
 }
@@ -1064,7 +1250,7 @@ const MODULE_TITLES = {
   postlaunch: 'Post-launch',
 }
 
-export function ModuleDetail({ id, usasatStatus, ruleReady, noaaSigned, go, openModal, showToast }) {
+export function ModuleDetail({ id, usasatStatus, ruleReady, noaaSigned, go, openModal, showToast, logActivity }) {
   return (
     <div className="view">
       <Breadcrumbs
@@ -1072,10 +1258,10 @@ export function ModuleDetail({ id, usasatStatus, ruleReady, noaaSigned, go, open
       />
       {id === 'spectrum' && <SpectrumDetail usasatStatus={usasatStatus} go={go} />}
       {id === 'noaa' && <NoaaDetail noaaSigned={noaaSigned} openModal={openModal} />}
-      {id === 'itar' && <ItarDetail ruleReady={ruleReady} openModal={openModal} />}
+      {id === 'itar' && <ItarDetail ruleReady={ruleReady} openModal={openModal} logActivity={logActivity} />}
       {id === 'launch' && <LaunchDetail showToast={showToast} />}
-      {id === 'insurance' && <InsuranceDetail showToast={showToast} />}
-      {id === 'postlaunch' && <PostlaunchDetail go={go} />}
+      {id === 'insurance' && <InsuranceDetail showToast={showToast} logActivity={logActivity} />}
+      {id === 'postlaunch' && <PostlaunchDetail go={go} logActivity={logActivity} />}
     </div>
   )
 }
@@ -1225,7 +1411,15 @@ function NoaaDetail({ noaaSigned, openModal }) {
   )
 }
 
-function ItarDetail({ ruleReady, openModal }) {
+const BOM_STEPS = (files) => [
+  ...files.map((f) => ({ text: `Parsing ${f.name}`, detail: '214 line items · 38 unique part numbers', ms: 560 })),
+  { text: 'Collapsing to controlled assemblies', detail: `${ITAR_COMPONENTS.length} assemblies with export-relevant parts`, ms: 460 },
+  { text: 'Matching against CCL 9A515 and USML Category XV', detail: 'current rule: DDTC Cat XV rev. effective Jul 14, 2026', ms: 620 },
+  { text: 'Checking fundamental-research exclusion', detail: 'not available — commercial tasking revenue on record', ms: 420 },
+  { text: 'Writing classification matrix v5', ms: 360 },
+]
+
+function ItarDetail({ ruleReady, openModal, logActivity }) {
   return (
     <>
       <div className="dash-header">
@@ -1283,6 +1477,35 @@ function ItarDetail({ ruleReady, openModal }) {
           </tbody>
         </table>
       </div>
+
+      <div className="panel">
+        <UploadAndRun
+          title="Screen a bill of materials"
+          samples={UPLOAD_SAMPLES.bom}
+          sampleLabel="or use AURORA-1 BOM rev F →"
+          prompt="Drop a BOM or parts list"
+          hint="XLSX or CSV · every part is screened against the CCL and USML"
+          accept=".xlsx,.xls,.csv"
+          runTitle="Export-control screening"
+          steps={BOM_STEPS}
+          onDone={(files) => { logActivity?.(`Screened ${files[0].name} — ${ITAR_COMPONENTS.length} assemblies, 2 jurisdiction changes`); return true }}
+        >
+          <table className="table">
+            <thead><tr><th>Assembly</th><th>Result</th><th>Jurisdiction</th></tr></thead>
+            <tbody>
+              {ITAR_COMPONENTS.map((c, i) => (
+                <tr key={c.component} className="row-in" style={{ animationDelay: `${i * 110}ms` }}>
+                  <td className="name">{c.component}</td>
+                  <td className="mono" style={{ color: c.affected ? 'var(--a2)' : undefined }}>
+                    {c.affected ? `${c.cls} → ${c.newCls}` : c.cls}
+                  </td>
+                  <td>{c.affected ? <Tag color="red">Moves to State</Tag> : <Tag color="green">{c.jurisdiction}</Tag>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </UploadAndRun>
+      </div>
     </>
   )
 }
@@ -1326,12 +1549,20 @@ function LaunchDetail({ showToast }) {
   )
 }
 
-function InsuranceDetail({ showToast }) {
+function InsuranceDetail({ showToast, logActivity }) {
   const [regenerating, setRegenerating] = useState(false)
-  const regenerate = () => {
-    setRegenerating(true)
-    setTimeout(() => { setRegenerating(false); showToast('Documentation package regenerated') }, 1600)
-  }
+  const regenerate = () => setRegenerating(true)
+  const steps = useMemo(() => [
+    { text: 'Pulling current constellation state and filings', detail: '6 SC · 12 filings', ms: 420 },
+    { text: 'Refreshing MPL and third-party liability figures', detail: '$42M MPL unchanged', ms: 460 },
+    { text: 'Rebuilding underwriter data room export', detail: '6 documents · 2.9 MB', ms: 560 },
+    { text: 'Syncing to underwriter portal', ms: 380 },
+  ], [])
+  const onDone = useCallback(() => {
+    setRegenerating(false)
+    showToast('Documentation package regenerated')
+    logActivity?.('Regenerated underwriter documentation package — synced to data room')
+  }, [showToast, logActivity])
 
   return (
     <>
@@ -1363,6 +1594,9 @@ function InsuranceDetail({ showToast }) {
         ))}
       </div>
 
+      {regenerating && (
+        <div className="panel"><AgentSteps title="Regenerating package" steps={steps} onDone={onDone} /></div>
+      )}
       <button className="btn btn-primary" onClick={regenerate} disabled={regenerating}>
         {regenerating ? <><span className="spinner" /> Regenerating package…</> : 'Regenerate package'}
       </button>
@@ -1370,7 +1604,15 @@ function InsuranceDetail({ showToast }) {
   )
 }
 
-function PostlaunchDetail({ go }) {
+const TELEMETRY_STEPS = (files) => [
+  ...files.map((f) => ({ text: `Parsing ${f.name}`, detail: `${formatBytes(f.size)} · 412,880 frames`, ms: 620 })),
+  { text: 'Time-aligning frames to spacecraft ephemeris', detail: '5 spacecraft in view during the pass', ms: 460 },
+  { text: 'Computing median EIRP per spacecraft', detail: 'AURORA-1D 43.1 dBW · others within ±0.2 dB', ms: 560 },
+  { text: 'Checking occupied bandwidth against the licensed uplink', detail: 'all carriers inside 13.85–14.0 GHz', ms: 440 },
+  { text: 'Updating drift flags', detail: '1 flag held (AURORA-1D +0.8 dB)', ms: 340 },
+]
+
+function PostlaunchDetail({ go, logActivity }) {
   const [reportState, setReportState] = useState('idle')
   const generateReport = () => setReportState('generating')
   const REPORT_STEPS = useMemo(() => [
@@ -1424,6 +1666,32 @@ function PostlaunchDetail({ go }) {
       </div>
 
       <div className="panel">
+        <UploadAndRun
+          title="Ingest a telemetry file"
+          samples={UPLOAD_SAMPLES.telemetry}
+          sampleLabel="or use pass 1846 telemetry →"
+          prompt="Drop RF telemetry from a pass (CSV)"
+          hint="Checked against every licensed parameter above"
+          accept=".csv,.txt,.bin"
+          runTitle="Checking telemetry against the licence"
+          steps={TELEMETRY_STEPS}
+          onDone={(files) => { logActivity?.(`Ingested ${files[0].name} — 5 SC checked, AURORA-1D drift flag held`); return true }}
+        >
+          {inOrbit.map((s, i) => (
+            <div key={s.id} className="check-item row-in" style={{ animationDelay: `${i * 100}ms` }}>
+              <span className="check-icon">{s.rf === 'Nominal' ? '✓' : '!'}</span>
+              <div style={{ flex: 1 }}>
+                <div>{s.name}</div>
+                <div className="sub">
+                  EIRP {s.obsEirp} · {s.rf === 'Nominal' ? 'within licence' : '+0.8 dB above licence — RF review in 5 days'}
+                </div>
+              </div>
+            </div>
+          ))}
+        </UploadAndRun>
+      </div>
+
+      <div className="panel">
         <div className="panel-title">Deorbit compliance — FCC 5-year rule</div>
         {inOrbit.map((s) => (
           <div key={s.id} style={{ marginBottom: 12 }}>
@@ -1460,7 +1728,14 @@ function PostlaunchDetail({ go }) {
 /* Documents                                                           */
 /* ================================================================== */
 
-export function DocumentsView({ openModal, showToast, docs = DOCUMENTS }) {
+const DOC_STEPS = (files) => files.flatMap((f) => [
+  { text: `OCR and text layer — ${f.name}`, detail: `${f.pages} ${f.pages === 1 ? 'page' : 'pages'} · 99.2 % confidence`, ms: 520 },
+  { text: 'Classifying document', detail: fileKind(f.name), ms: 380 },
+  { text: 'Linking to filings and obligations', detail: /telesat|letter|reply/i.test(f.name) ? 'CR/C/3021-214 · ITU coordination response — Telesat' : 'AURORA-1 programme', ms: 440 },
+]).concat([{ text: 'Indexing for search', detail: 'added to Documents', ms: 300 }])
+
+export function DocumentsView({ openModal, showToast, docs = DOCUMENTS, onAddDocs }) {
+  const [uploading, setUploading] = useState(false)
   const [q, setQ] = useState('')
   const [type, setType] = useState('all')
 
@@ -1482,7 +1757,33 @@ export function DocumentsView({ openModal, showToast, docs = DOCUMENTS }) {
           <div className="page-title">Documents</div>
           <div className="page-sub">Generated filings, letters, and compliance packages</div>
         </div>
+        <div className="head-actions">
+          <button className="btn btn-primary" onClick={() => setUploading((u) => !u)}>{uploading ? 'Close' : '+ Upload'}</button>
+        </div>
       </div>
+
+      {uploading && (
+        <div className="panel">
+          <UploadAndRun
+            title="Add documents"
+            samples={UPLOAD_SAMPLES.documents}
+            sampleLabel="or use Telesat's reply →"
+            prompt="Drop any document — Kolhar reads, classifies and files it"
+            hint="PDF, DOCX, XLSX"
+            runTitle="Filing documents"
+            steps={DOC_STEPS}
+            onDone={(files) => {
+              onAddDocs?.(files.map((f) => ({
+                id: `doc-up-${f.id}`, name: f.name, type: fileKind(f.name), mission: 'AURORA-1',
+                date: 'Jul 31, 2026', version: 'v1', kind: 'filing', size: formatBytes(f.size), owner: 'j.okafor', isNew: true,
+              })))
+              return files.length
+            }}
+          >
+            {(n) => <div className="calc-verdict">✓ {n} {n === 1 ? 'document' : 'documents'} classified, linked and added below.</div>}
+          </UploadAndRun>
+        </div>
+      )}
 
       <div className="toolbar">
         <input className="input input-search" placeholder="Search documents…" value={q} onChange={(e) => setQ(e.target.value)} />
@@ -1539,10 +1840,28 @@ export function DocumentsView({ openModal, showToast, docs = DOCUMENTS }) {
 /* Regulatory feed                                                     */
 /* ================================================================== */
 
-export function FeedView() {
+const guessSource = (name) => {
+  const n = name.toLowerCase()
+  if (/47cfr|fcc/.test(n)) return 'FCC'
+  if (/960|noaa|crsra/.test(n)) return 'NOAA'
+  if (/itu|ific|wrc/.test(n)) return 'ITU'
+  if (/ddtc|usml|itar/.test(n)) return 'DDTC'
+  if (/faa|450/.test(n)) return 'FAA'
+  return 'FCC'
+}
+
+const RULE_STEPS = (files) => [
+  ...files.map((f) => ({ text: `Reading ${f.name}`, detail: `${f.pages} pages · ${guessSource(f.name)} publication`, ms: 560 })),
+  { text: 'Extracting amended provisions and effective dates', detail: '3 provisions · effective in 60 days', ms: 520 },
+  { text: 'Matching against 12 filings and 6 compliance modules', detail: '2 filings and the Spectrum module affected', ms: 600 },
+  { text: 'Scoring severity and drafting actions', detail: 'Medium', ms: 420 },
+]
+
+export function FeedView({ feed = FEED, openModal, onAddFeed }) {
   const [src, setSrc] = useState('all')
-  const sources = ['all', ...new Set(FEED.map((f) => f.source))]
-  const rows = FEED.filter((f) => src === 'all' || f.source === src)
+  const [adding, setAdding] = useState(false)
+  const sources = ['all', ...new Set(feed.map((f) => f.source))]
+  const rows = feed.filter((f) => src === 'all' || f.source === src)
 
   return (
     <div className="view">
@@ -1551,7 +1870,38 @@ export function FeedView() {
           <div className="page-title">Regulatory feed</div>
           <div className="page-sub">Rule changes and publications affecting the {OPERATOR.constellation} program</div>
         </div>
+        <div className="head-actions">
+          <button className="btn btn-primary" onClick={() => setAdding((a) => !a)}>{adding ? 'Close' : '+ Add a rule'}</button>
+        </div>
       </div>
+
+      {adding && (
+        <div className="panel">
+          <UploadAndRun
+            title="Analyse a publication"
+            samples={UPLOAD_SAMPLES.rule}
+            sampleLabel="or use FR 2026-16218 (47 CFR 25 EPFD update) →"
+            prompt="Drop a rule, notice or circular (PDF)"
+            hint="Federal Register notices, FCC orders, ITU circulars, DDTC rules"
+            accept=".pdf,.docx,.txt,.html"
+            runTitle="Impact analysis"
+            steps={RULE_STEPS}
+            onDone={(files) => {
+              const f = files[0]
+              onAddFeed?.({
+                id: `up-${f.id}`, date: 'Jul 31, 2026', severity: 'Medium', source: guessSource(f.name), isNew: true,
+                title: f.name.replace(/\.[a-z0-9]+$/i, '').replace(/[_-]+/g, ' '),
+                text: 'Uploaded publication — 3 amended provisions, effective in 60 days.',
+                impact: 'Two AURORA-1 filings (Schedule S and the Ka feeder-link modification) reference the amended provisions. Current EPFD margins still hold, but the Schedule S technical annex must cite the revised limits.',
+                action: 'Regenerate the Schedule S annex against the new text and update the Ka modification before its comment period closes.',
+              })
+              return true
+            }}
+          >
+            <div className="calc-verdict">✓ Analysed and added to the top of the feed — open it for the full impact.</div>
+          </UploadAndRun>
+        </div>
+      )}
 
       <div className="toolbar">
         <Segmented
@@ -1567,14 +1917,17 @@ export function FeedView() {
 
       <div className="panel">
         {rows.map((e) => (
-          <div className="feed-item" key={e.id}>
+          <div className={`feed-item${e.isNew ? ' row-in' : ''}`} key={e.id}>
             <div className="feed-date">{e.date}</div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div className="feed-title">{e.title}</div>
+              <div className="feed-title">{e.title}{e.isNew && <span className="new-flag">New</span>}</div>
               <div className="feed-text">{e.text}</div>
             </div>
             <Tag color="grey">{e.source}</Tag>
             <Tag color={SEVERITY_TAG[e.severity]}>{e.severity}</Tag>
+            {e.impact && (
+              <button className="btn btn-outline btn-sm" onClick={() => openModal?.({ type: 'impact', id: e.id })}>Analyze impact</button>
+            )}
           </div>
         ))}
         {rows.length === 0 && <Empty>Nothing from that source.</Empty>}
