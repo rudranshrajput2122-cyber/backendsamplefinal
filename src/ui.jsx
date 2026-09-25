@@ -1,6 +1,6 @@
 /* Shared UI primitives for the Kolhar console */
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 export function Tag({ color, children }) {
   return <span className={`tag tag-${color}`}>{children}</span>
@@ -227,4 +227,110 @@ export function Lifecycle({ stages, current }) {
 
 export function Empty({ children }) {
   return <div className="empty">{children}</div>
+}
+
+/* ------------------------------------------------------------------ */
+/* Live-work primitives — what the agent looks like while it's working */
+/* ------------------------------------------------------------------ */
+
+/* re-renders every `ms`; returns the tick count */
+export function useTicker(ms) {
+  const [n, setN] = useState(0)
+  useEffect(() => {
+    const t = setInterval(() => setN((x) => x + 1), ms)
+    return () => clearInterval(t)
+  }, [ms])
+  return n
+}
+
+/* types `text` out a few characters per frame; skip() jumps to the end */
+export function useTypewriter(text, active = true, charsPerFrame = 5) {
+  const [n, setN] = useState(active ? 0 : text.length)
+  useEffect(() => {
+    if (!active) { setN(text.length); return }
+    setN(0)
+    let raf
+    let i = 0
+    const step = () => {
+      /* slow down a touch on line breaks so paragraphs read as "thought" */
+      i = Math.min(text.length, i + (text[i] === '\n' ? 1 : charsPerFrame))
+      setN(i)
+      if (i < text.length) raf = requestAnimationFrame(step)
+    }
+    raf = requestAnimationFrame(step)
+    return () => cancelAnimationFrame(raf)
+  }, [text, active, charsPerFrame])
+  return { shown: text.slice(0, n), done: n >= text.length, skip: () => setN(text.length) }
+}
+
+/* eased count from 0 to `to` */
+export function CountUp({ to, ms = 700, decimals = 0, suffix = '' }) {
+  const [v, setV] = useState(0)
+  useEffect(() => {
+    let raf
+    const start = performance.now()
+    const tick = (now) => {
+      const k = Math.max(0, Math.min(1, (now - start) / ms))
+      setV(to * (1 - (1 - k) ** 3))
+      if (k < 1) raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [to, ms])
+  return <>{v.toFixed(decimals)}{suffix}</>
+}
+
+/* Runs `steps` one after another — spinner while running, tick and
+   timing when done — then calls onDone. Each step: { text, detail?, ms } */
+export function AgentSteps({ steps, onDone, title }) {
+  const [idx, setIdx] = useState(0)
+  const [times, setTimes] = useState([])
+  const doneRef = useRef(false)
+  /* held in a ref so a parent re-render can't restart the running step */
+  const onDoneRef = useRef(onDone)
+  onDoneRef.current = onDone
+
+  useEffect(() => {
+    if (idx >= steps.length) {
+      if (!doneRef.current) { doneRef.current = true; onDoneRef.current?.() }
+      return
+    }
+    const ms = steps[idx].ms ?? 500
+    const t = setTimeout(() => {
+      /* jitter the reported time so it doesn't read as a canned animation */
+      setTimes((ts) => [...ts, Math.round(ms * (0.82 + ((idx * 37) % 30) / 100))])
+      setIdx((i) => i + 1)
+    }, ms)
+    return () => clearTimeout(t)
+  }, [idx, steps])
+
+  const pct = Math.round((idx / steps.length) * 100)
+
+  return (
+    <div className="agent-steps">
+      <div className="agent-steps-head">
+        <span>{title || 'Kolhar agent'}</span>
+        <span className="mono">{Math.min(idx, steps.length)} / {steps.length}</span>
+      </div>
+      <div className="progress-track agent-track">
+        <div className="agent-track-fill" style={{ width: `${pct}%` }} />
+      </div>
+      {steps.slice(0, idx + 1).map((s, i) => (
+        <div key={i} className={`agent-step${i < idx ? ' done' : ' running'}`}>
+          <span className="agent-step-icon">{i < idx ? '✓' : <span className="spinner" />}</span>
+          <span className="agent-step-body">
+            <span className="agent-step-text">{s.text}</span>
+            {s.detail && i < idx && <span className="agent-step-detail">{s.detail}</span>}
+          </span>
+          {i < idx && <span className="agent-step-ms mono">{times[i]} ms</span>}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+export function formatBytes(b) {
+  if (b >= 1048576) return `${(b / 1048576).toFixed(1)} MB`
+  if (b >= 1024) return `${Math.round(b / 1024)} KB`
+  return `${b} B`
 }

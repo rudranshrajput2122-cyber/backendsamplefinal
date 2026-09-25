@@ -1,14 +1,15 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Tag, Check, Breadcrumbs, WorkingBar, SuccessBlock, FreqViz, Lifecycle,
-  Segmented, Th, useSort, Empty,
+  Segmented, Th, useSort, Empty, AgentSteps, CountUp, useTicker, useTypewriter, formatBytes,
 } from './ui.jsx'
 import {
   OPERATOR, EXTRACTED_FIELDS, FILINGS, FILING_STATUS_COLOR,
   LIFECYCLE_STAGES, AGENCIES, CONFLICTS, SEVERITY_COLOR, CONFLICT_STATUS_COLOR,
   SPACECRAFT, SPACECRAFT_FILINGS, MODULES, SPECTRUM_ALLOCATIONS, GROUND_STATIONS,
   ITAR_COMPONENTS, NOAA_CONDITIONS, LAUNCH_CHECKLIST, INSURANCE_CHECKLIST,
-  DOCUMENTS, FEED, SEVERITY_TAG, freqGeometry,
+  DOCUMENTS, FEED, SEVERITY_TAG, freqGeometry, SAMPLE_FILES, SCAN_NOISE, VALIDATION_CHECKS,
+  ACTIVITY, interferenceModel,
 } from './data.js'
 
 export const resolveConflictStatus = (c, usasatStatus) => (c.id === 'usasat' ? usasatStatus : c.status)
@@ -18,9 +19,10 @@ export const resolveConflictStatus = (c, usasatStatus) => (c.id === 'usasat' ? u
 /* ================================================================== */
 
 export function Dashboard({
-  deadlines, usasatStatus, ruleReady, noaaSigned, go, openModal,
+  deadlines, usasatStatus, ruleReady, noaaSigned, go, openModal, activity,
 }) {
   const [owner, setOwner] = useState('all')
+  const tick = useTicker(2400)
 
   const outreachSent = usasatStatus === 'Outreach sent'
 
@@ -113,8 +115,11 @@ export function Dashboard({
         })}
       </div>
 
-      <div className="panel flush">
-        <div className="panel-title">Constellation</div>
+      <div className="panel flush" style={{ marginBottom: 46 }}>
+        <div className="panel-title">
+          Constellation
+          <span className="t-right live-label"><span className="live-dot" />Telemetry · pass {1840 + tick}</span>
+        </div>
         <table className="table">
           <thead>
             <tr>
@@ -128,7 +133,7 @@ export function Dashboard({
             </tr>
           </thead>
           <tbody>
-            {SPACECRAFT.map((s) => (
+            {SPACECRAFT.map((s, i) => (
               <tr key={s.id} className="rowlink" onClick={() => go('spacecraft', s.id)}>
                 <td className="name">{s.name}</td>
                 <td className="muted">{s.authority}</td>
@@ -138,7 +143,7 @@ export function Dashboard({
                 <td className="muted">{s.orbit}</td>
                 <td className="num muted">42.3 dBW</td>
                 <td className="num" style={{ color: s.rf === 'Drift detected' ? 'var(--a2)' : undefined }}>
-                  {s.obsEirp}
+                  <LiveEirp value={s.obsEirp} tick={tick} seed={i} />
                 </td>
                 <td className="muted">{s.next}</td>
               </tr>
@@ -146,8 +151,31 @@ export function Dashboard({
           </tbody>
         </table>
       </div>
+
+      <div className="panel flush">
+        <div className="panel-title">
+          Agent activity
+          <span className="t-right live-label"><span className="live-dot" />Running</span>
+        </div>
+        {activity.slice(0, 8).map((a) => (
+          <div key={a.id} className={`activity-row${a.fresh ? ' fresh' : ''}`}>
+            <span className="activity-t mono">{a.t}</span>
+            <span className={`activity-who${a.kind === 'agent' ? ' agent' : ''}`}>{a.who}</span>
+            <span className="activity-text">{a.text}</span>
+          </div>
+        ))}
+      </div>
     </div>
   )
+}
+
+/* observed EIRP wanders a tenth of a dB either way, like a real pass does */
+function LiveEirp({ value, tick, seed }) {
+  const base = parseFloat(value)
+  if (Number.isNaN(base)) return <>{value}</>
+  const wobble = (((tick * 7 + seed * 13) % 5) - 2) * 0.05
+  const v = (base + wobble).toFixed(1)
+  return <span key={v} className="live-val">{v} dBW</span>
 }
 
 /* ================================================================== */
@@ -156,34 +184,48 @@ export function Dashboard({
 
 export function FilingWizard({ onExit, onGenerated, showToast }) {
   const [step, setStep] = useState(1)
-  const [uploaded, setUploaded] = useState(false)
+  const [files, setFiles] = useState([])
   const [extracted, setExtracted] = useState(false)
   const [generated, setGenerated] = useState(false)
   const [fields, setFields] = useState(EXTRACTED_FIELDS)
   const [editing, setEditing] = useState(null)
   const [target, setTarget] = useState('schs')
 
-  useEffect(() => {
-    if (step === 2) {
-      setExtracted(false)
-      const t = setTimeout(() => setExtracted(true), 1900)
-      return () => clearTimeout(t)
-    }
-    if (step === 3) {
-      setGenerated(false)
-      const t = setTimeout(() => { setGenerated(true); onGenerated() }, 1900)
-      return () => clearTimeout(t)
-    }
-  }, [step])
-
-  const setValue = (field, value) => setFields((fs) => fs.map((f) => (f.field === field ? { ...f, value, confidence: 100, edited: true } : f)))
-  const low = fields.filter((f) => f.confidence < 95).length
-
   const TARGETS = [
     { value: 'schs', label: 'FCC Schedule S' },
     { value: 'api', label: 'ITU API' },
     { value: 'noaa', label: 'NOAA CRSRA' },
   ]
+  const targetLabel = TARGETS.find((t) => t.value === target).label
+
+  const setValue = (field, value) => setFields((fs) => fs.map((f) => (f.field === field ? { ...f, value, confidence: 100, edited: true } : f)))
+  const low = fields.filter((f) => f.confidence < 95).length
+  const allParsed = files.length > 0 && files.every((f) => f.parsed)
+
+  const checks = useMemo(
+    () => [
+      { text: `Loading ${targetLabel} schema`, detail: `${fields.length} extracted fields mapped to form items`, ms: 420 },
+      ...VALIDATION_CHECKS.map((c, i) => ({ text: `${c.rule} — ${c.text}`, detail: c.detail, ms: 300 + ((i * 97) % 260) })),
+      { text: 'Rendering technical annex (PDF/A-2b)', detail: '14 pages · signed hash 9f3c…a41e', ms: 650 },
+    ],
+    [targetLabel, fields.length],
+  )
+
+  const onChecksDone = useCallback(() => {
+    setGenerated(true)
+    onGenerated({
+      id: `doc-gen-${target}`,
+      name: `AURORA-1_${targetLabel.replace(/\s+/g, '_')}_annex.pdf`,
+      type: 'Filing',
+      mission: 'AURORA-1',
+      date: 'Jul 31, 2026',
+      version: 'v1',
+      kind: 'filing',
+      size: '1.6 MB',
+      owner: 's.chandra',
+      isNew: true,
+    })
+  }, [onGenerated, target, targetLabel])
 
   return (
     <div className="view wizard">
@@ -213,21 +255,9 @@ export function FilingWizard({ onExit, onGenerated, showToast }) {
               <Segmented value={target} onChange={setTarget} options={TARGETS} />
             </span>
           </div>
-          {!uploaded ? (
-            <button className="dropzone" onClick={() => setUploaded(true)}>
-              <div style={{ fontSize: 22, marginBottom: 10, color: 'var(--a2)' }}>⇪</div>
-              Drop operator documentation
-              <div style={{ fontSize: 11.5, marginTop: 6 }}>PDF, DOCX, or link-budget spreadsheets</div>
-            </button>
-          ) : (
-            <div style={{ textAlign: 'center', padding: '34px 0' }}>
-              <span className="file-chip">
-                <span style={{ color: 'var(--a2)' }}>✓</span> aurora1_bus_icd_rev_c.pdf · 4.2 MB
-              </span>
-            </div>
-          )}
+          <UploadZone files={files} setFiles={setFiles} />
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
-            <button className="btn btn-primary" disabled={!uploaded} onClick={() => setStep(2)}>
+            <button className="btn btn-primary" disabled={!allParsed} onClick={() => { setExtracted(false); setStep(2) }}>
               Extract with agent
             </button>
           </div>
@@ -237,7 +267,7 @@ export function FilingWizard({ onExit, onGenerated, showToast }) {
       {step === 2 && (
         <div className="panel">
           {!extracted ? (
-            <WorkingBar label="Agent extracting technical parameters from aurora1_bus_icd_rev_c.pdf…" />
+            <ExtractionRun files={files} onDone={() => setExtracted(true)} />
           ) : (
             <>
               <div className="panel-title">
@@ -248,7 +278,7 @@ export function FilingWizard({ onExit, onGenerated, showToast }) {
               </div>
               <table className="table" style={{ marginBottom: 16 }}>
                 <thead>
-                  <tr><th>Field</th><th>Extracted value</th><th className="num">Confidence</th><th></th></tr>
+                  <tr><th>Field</th><th>Extracted value</th><th>Source</th><th className="num">Confidence</th><th></th></tr>
                 </thead>
                 <tbody>
                   {fields.map((f) => (
@@ -270,6 +300,7 @@ export function FilingWizard({ onExit, onGenerated, showToast }) {
                           </>
                         )}
                       </td>
+                      <td className="muted" style={{ fontSize: 11 }}>{f.edited ? 'Operator override' : f.source}</td>
                       <td className={`num mono ${f.confidence < 95 ? 'confidence' : 'muted'}`}>{f.confidence}%</td>
                       <td className="num">
                         <div className="row-actions">
@@ -282,7 +313,7 @@ export function FilingWizard({ onExit, onGenerated, showToast }) {
               </table>
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                 <button className="btn btn-outline" onClick={() => setStep(1)}>Back</button>
-                <button className="btn btn-primary" onClick={() => setStep(3)}>Validate &amp; generate</button>
+                <button className="btn btn-primary" onClick={() => { setGenerated(false); setStep(3) }}>Validate &amp; generate</button>
               </div>
             </>
           )}
@@ -292,17 +323,21 @@ export function FilingWizard({ onExit, onGenerated, showToast }) {
       {step === 3 && (
         <div className="panel">
           {!generated ? (
-            <WorkingBar label="Rules engine validating against FCC Part 25 / ITU Appendix 4 / 15 CFR 960…" />
+            <AgentSteps title="Rules engine · Part 25 / ITU App. 4 / 15 CFR 960" steps={checks} onDone={onChecksDone} />
           ) : (
-            <SuccessBlock title="Filing generated" sub="Validated against Part 25, ITU Appendix 4, and NOAA Tier 2 conditions">
+            <SuccessBlock title="Filing generated" sub={`${checks.length - 2} of ${checks.length - 2} checks passed · saved to Documents`}>
               <div className="doc-preview">
                 <div className="doc-title">
-                  {TARGETS.find((t) => t.value === target).label.toUpperCase()} · TECHNICAL ANNEX · AURORA-1
+                  {targetLabel.toUpperCase()} · TECHNICAL ANNEX · AURORA-1
                 </div>
-                {fields.map((f) => (
-                  <div className="doc-row" key={f.field}><span>{f.field}</span><span>{f.value}</span></div>
+                {fields.map((f, i) => (
+                  <div className="doc-row row-in" style={{ animationDelay: `${i * 70}ms` }} key={f.field}>
+                    <span>{f.field}</span><span>{f.value}</span>
+                  </div>
                 ))}
-                <div className="doc-row"><span>Validation</span><span>Part 25 ✓ · App. 4 ✓ · 960 ✓</span></div>
+                <div className="doc-row row-in" style={{ animationDelay: `${fields.length * 70}ms` }}>
+                  <span>Validation</span><span>Part 25 ✓ · App. 4 ✓ · 960 ✓</span>
+                </div>
               </div>
               <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
                 <button className="btn btn-outline" onClick={() => showToast('Download started')}>Download filing</button>
@@ -312,6 +347,234 @@ export function FilingWizard({ onExit, onGenerated, showToast }) {
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Upload — real drag/drop or picker; the transfer itself is simulated */
+/* ------------------------------------------------------------------ */
+
+const estimatePages = (name, size) => {
+  if (/\.xlsx?$/i.test(name)) return Math.max(1, Math.min(8, Math.round(size / 60000)))
+  return Math.max(1, Math.min(320, Math.round(size / 52000)))
+}
+
+function UploadZone({ files, setFiles }) {
+  const [dragging, setDragging] = useState(false)
+  const inputRef = useRef(null)
+
+  const add = (list) => {
+    const incoming = list.map((f, i) => ({
+      id: `${f.name}-${Date.now()}-${i}`,
+      name: f.name,
+      size: f.size,
+      pages: f.pages ?? estimatePages(f.name, f.size),
+      progress: 0,
+      parsed: false,
+    }))
+    setFiles((fs) => [...fs, ...incoming.filter((n) => !fs.some((f) => f.name === n.name))])
+  }
+
+  /* one timer drives every in-flight file: upload, then a short parse */
+  const busy = files.some((f) => !f.parsed)
+  useEffect(() => {
+    if (!busy) return
+    const t = setInterval(() => {
+      setFiles((fs) =>
+        fs.map((f) => {
+          if (f.parsed) return f
+          if (f.progress >= 100) return { ...f, parseTicks: (f.parseTicks || 0) + 1, parsed: (f.parseTicks || 0) >= 7 }
+          /* bigger files move slower, like a real transfer */
+          const rate = Math.max(3, 22 - f.size / 400000)
+          return { ...f, progress: Math.min(100, f.progress + rate * (0.6 + Math.random() * 0.8)) }
+        }),
+      )
+    }, 90)
+    return () => clearInterval(t)
+  }, [busy, setFiles])
+
+  const onDrop = (e) => {
+    e.preventDefault()
+    setDragging(false)
+    if (e.dataTransfer.files?.length) add([...e.dataTransfer.files])
+  }
+
+  return (
+    <>
+      <div
+        className={`dropzone${dragging ? ' dragging' : ''}${files.length ? ' compact' : ''}`}
+        role="button"
+        tabIndex={0}
+        onClick={() => inputRef.current?.click()}
+        onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && inputRef.current?.click()}
+        onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={onDrop}
+      >
+        <div className="dz-glyph">⇪</div>
+        {dragging ? 'Release to upload' : 'Drop operator documentation, or click to browse'}
+        <div style={{ fontSize: 11.5, marginTop: 6 }}>PDF, DOCX, or link-budget spreadsheets</div>
+        <input
+          ref={inputRef}
+          type="file"
+          multiple
+          accept=".pdf,.doc,.docx,.xls,.xlsx,.csv"
+          style={{ display: 'none' }}
+          onChange={(e) => { add([...e.target.files]); e.target.value = '' }}
+        />
+      </div>
+
+      {files.length === 0 ? (
+        <div style={{ textAlign: 'center', marginTop: 14 }}>
+          <button className="btn btn-ghost" onClick={() => add(SAMPLE_FILES)}>or use AURORA-1 sample documents →</button>
+        </div>
+      ) : (
+        <div className="file-list">
+          {files.map((f) => (
+            <div key={f.id} className="file-row">
+              <span className="file-ext mono">{(f.name.split('.').pop() || '').toUpperCase().slice(0, 4)}</span>
+              <div className="file-main">
+                <div className="file-name">
+                  <span className="mono">{f.name}</span>
+                  <span className="file-meta mono">
+                    {f.parsed
+                      ? `${formatBytes(f.size)} · ${f.pages} ${/\.xlsx?$/i.test(f.name) ? 'sheets' : 'pages'} · text layer ok`
+                      : f.progress < 100
+                        ? `${formatBytes((f.size * f.progress) / 100)} of ${formatBytes(f.size)}`
+                        : 'Parsing layout…'}
+                  </span>
+                </div>
+                <div className="file-track">
+                  <div className={`file-fill${f.progress >= 100 && !f.parsed ? ' parsing' : ''}`} style={{ width: `${f.progress}%` }} />
+                </div>
+              </div>
+              <span className="file-state">
+                {f.parsed ? <span style={{ color: 'var(--a2)' }}>✓</span> : <span className="spinner" />}
+              </span>
+              <button
+                className="icon-btn"
+                title="Remove"
+                onClick={() => setFiles((fs) => fs.filter((x) => x.id !== f.id))}
+              >✕</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Extraction — scan each document, fields fly out as they're found    */
+/* ------------------------------------------------------------------ */
+
+const SOURCE_DOC = { 'Bus ICD': 0, 'Frequency plan': 1, 'Link budget': 2 }
+
+function buildScanEvents(files) {
+  const byDoc = files.map(() => [])
+  EXTRACTED_FIELDS.forEach((f) => {
+    const doc = SOURCE_DOC[f.source.split(' · ')[0]] % files.length
+    const page = parseInt((f.source.match(/p\.(\d+)/) || [])[1], 10) || 1
+    byDoc[doc].push({ kind: 'hit', field: f, page })
+  })
+  let noise = 0
+  const events = []
+  byDoc.forEach((hits, doc) => {
+    const pages = files[doc].pages
+    const n = Math.max(2, 4 - hits.length / 2)
+    const seq = []
+    for (let i = 0; i < n; i++) {
+      seq.push({ kind: 'scan', text: SCAN_NOISE[noise++ % SCAN_NOISE.length], page: Math.round(((i + 1) / (n + 1)) * pages) || 1 })
+    }
+    /* interleave hits into the scan lines by page so the counter only moves forward */
+    const merged = [...seq, ...hits].sort((a, b) => a.page - b.page)
+    merged.forEach((e) => events.push({ ...e, doc, page: Math.min(e.page, pages) }))
+    events.push({ kind: 'close', doc, page: pages, text: `${files[doc].name} — ${hits.length} parameters, ${pages} ${pages === 1 ? 'page' : 'pages'} read` })
+  })
+  return events
+}
+
+function ExtractionRun({ files, onDone }) {
+  const events = useMemo(() => buildScanEvents(files), [files])
+  const [i, setI] = useState(0)
+
+  useEffect(() => {
+    if (i >= events.length) {
+      const t = setTimeout(onDone, 700)
+      return () => clearTimeout(t)
+    }
+    const e = events[i]
+    const t = setTimeout(() => setI((x) => x + 1), e.kind === 'hit' ? 520 : 300)
+    return () => clearTimeout(t)
+  }, [i, events, onDone])
+
+  const current = events[Math.min(i, events.length - 1)]
+  const found = events.slice(0, i).filter((e) => e.kind === 'hit')
+  const lastHit = events[i - 1]?.kind === 'hit' ? events[i - 1] : null
+  const log = events.slice(Math.max(0, i - 5), i)
+
+  return (
+    <div className="extract">
+      <div className="panel-title">
+        Agent extracting technical parameters
+        <span className="t-right mono" style={{ fontSize: 11, color: 'var(--faint)' }}>
+          {found.length} / {EXTRACTED_FIELDS.length} fields
+        </span>
+      </div>
+
+      <div className="extract-grid">
+        <div>
+          <div className="doc-tabs">
+            {files.map((f, d) => (
+              <span
+                key={f.id}
+                className={`doc-tab mono${d === current.doc ? ' on' : ''}${d < current.doc || i >= events.length ? ' read' : ''}`}
+              >
+                {d < current.doc || i >= events.length ? '✓ ' : ''}{f.name.length > 22 ? `${f.name.slice(0, 20)}…` : f.name}
+              </span>
+            ))}
+          </div>
+          <div className="scan-doc" key={current.doc}>
+            {Array.from({ length: 16 }, (_, k) => (
+              <div
+                key={k}
+                className={`scan-line${lastHit && k === (lastHit.page * 5) % 16 ? ' hit' : ''}`}
+                style={{ width: `${55 + ((k * 37 + current.page * 11) % 42)}%` }}
+              />
+            ))}
+            <div className="scan-beam" />
+            {lastHit && (
+              <span className="scan-chip mono" key={lastHit.field.field} style={{ top: `${(((lastHit.page * 5) % 16) / 16) * 100}%` }}>
+                {lastHit.field.field} · {lastHit.field.value}
+              </span>
+            )}
+            <div className="scan-page mono">p. {current.page} / {files[current.doc].pages}</div>
+          </div>
+        </div>
+
+        <div className="found-list">
+          {found.length === 0 && <div className="found-empty">Reading document structure…</div>}
+          {found.map((e) => (
+            <div className="found-row" key={e.field.field}>
+              <span className="found-k">{e.field.field}</span>
+              <span className="found-v mono">{e.field.value}</span>
+              <span className={`found-c mono${e.field.confidence < 95 ? ' low' : ''}`}>
+                <CountUp to={e.field.confidence} ms={600} />%
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="scan-log mono">
+        {log.map((e, k) => (
+          <div key={i - log.length + k} className={`scan-log-line ${e.kind}`}>
+            <span className="scan-log-page">{files[e.doc].name.split('_').slice(0, 2).join('_')} p.{e.page}</span>
+            {e.kind === 'hit' ? `→ ${e.field.field} = ${e.field.value}  (${e.field.source})` : e.text}
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -582,7 +845,9 @@ export function ConflictDetail({ id, usasatStatus, go, openModal }) {
         <div className="param-cell"><div className="k">Circular</div><div className="v">{conflict.ific}</div></div>
       </div>
 
-      <FreqViz conflict={conflict} geometry={freqGeometry(conflict.ours, conflict.theirs)} />
+      <FreqViz key={conflict.id} conflict={conflict} geometry={freqGeometry(conflict.ours, conflict.theirs)} />
+
+      <InterferenceCalc key={`calc-${conflict.id}`} conflict={conflict} status={status} />
 
       <div className="two-col">
         <div className="panel flush">
@@ -621,6 +886,138 @@ export function ConflictDetail({ id, usasatStatus, go, openModal }) {
         )}
         <button className="btn btn-outline" onClick={() => go('conflicts')}>Back to conflicts</button>
       </div>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Interference computation — runs the model in data.js step by step   */
+/* ------------------------------------------------------------------ */
+
+const CALC_MS = 4200
+
+function InterferenceCalc({ conflict, status }) {
+  const m = useMemo(() => interferenceModel(conflict), [conflict])
+  const { p } = m
+  const [runId, setRunId] = useState(0)
+  const [prog, setProg] = useState(0)
+
+  useEffect(() => {
+    setProg(0)
+    let raf
+    const start = performance.now()
+    const tick = (now) => {
+      const k = Math.max(0, Math.min(1, (now - start) / CALC_MS))
+      setProg(k)
+      if (k < 1) raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [runId])
+
+  const sign = (x) => (x > 0 ? '+' : '')
+  const rows = [
+    { k: 'Evaluation frequency', eq: `centre of ${conflict.overlapMHz} MHz overlap`, v: `${p.f.toFixed(3)} GHz` },
+    { k: 'Free-space path loss', eq: `92.45 + 20·log ${p.slantKm} km + 20·log ${p.f} GHz`, v: `${m.fspl.toFixed(1)} dB` },
+    { k: 'Interferer in-band EIRP', eq: `${p.eirp} dBW + 10·log(${conflict.overlapMHz} / ${p.bwTheirs} MHz)`, v: `${m.eirpInBand.toFixed(1)} dBW` },
+    { k: 'Earth-station peak gain', eq: `20·log(D/λ) + 7.7 · D = ${p.dish} m`, v: `${m.gEs.toFixed(1)} dBi` },
+    { k: 'Receiver noise kTB', eq: `−228.6 + 10·log ${p.tsys} K + 10·log ${p.bwOurs} MHz`, v: `${m.kTB.toFixed(1)} dBW` },
+    { k: 'Closest separation', eq: `${m.curve.length} samples · S.465 / S.1528 patterns`, v: `${m.peak.theta.toFixed(2)}°` },
+    { k: 'Peak I/N', eq: 'I − N at closest approach', v: `${sign(m.peak.iN)}${m.peak.iN.toFixed(1)} dB`, hot: m.peak.iN > -6 },
+    { k: 'ΔT/T at peak', eq: '10^(I/N ÷ 10) · criterion 6 %', v: m.deltaTT >= 100 ? `${(Math.round(m.deltaTT / 10) * 10).toLocaleString()} %` : `${m.deltaTT.toFixed(2)} %`, hot: m.deltaTT > 6 },
+    { k: 'C/(N+I) degradation', eq: '10·log(1 + I/N)', v: `${m.cniLoss.toFixed(2)} dB` },
+    { k: 'Time I/N > −6 dB', eq: `${m.exceedMin.toFixed(1)} min/pass × ${p.eventsPerDay} events/day · limit 0.03 %`, v: `${m.dailyPct.toFixed(3)} %`, hot: m.harmful },
+  ]
+  const shownRows = Math.min(rows.length, Math.floor(prog * (rows.length + 1)))
+  const done = prog >= 1
+
+  /* chart geometry */
+  const W = 420
+  const H = 190
+  const pad = { l: 34, r: 10, t: 12, b: 24 }
+  const yMin = -40
+  const yMax = 15
+  const x = (t) => pad.l + (t / p.pass) * (W - pad.l - pad.r)
+  const y = (v) => pad.t + ((yMax - Math.max(yMin, Math.min(yMax, v))) / (yMax - yMin)) * (H - pad.t - pad.b)
+  const visible = m.curve.slice(0, Math.max(2, Math.round(Math.max(0, (prog - 0.35) / 0.55) * m.curve.length)))
+  const path = visible.map((c, i) => `${i ? 'L' : 'M'}${x(c.t).toFixed(1)},${y(c.iN).toFixed(1)}`).join(' ')
+  const area = `${path} L${x(visible[visible.length - 1].t).toFixed(1)},${y(yMin)} L${x(0)},${y(yMin)} Z`
+  const head = visible[visible.length - 1]
+
+  const verdict = m.harmful
+    ? status === 'Resolved'
+      ? `Pre-agreement geometry exceeds the short-term criterion (${(m.dailyPct / 0.03).toFixed(1)}× the limit). The signed coordination agreement segments the band — residual overlap 0 MHz.`
+      : `Harmful interference likely — the short-term criterion is exceeded ${(m.dailyPct / 0.03).toFixed(1)}× over. Coordination required under RR No. 9.7.`
+    : `Within protection criteria — I/N peaks at ${m.peak.iN.toFixed(1)} dB, below the −12.2 dB long-term threshold. Monitoring only.`
+
+  return (
+    <div className="panel calc-panel">
+      <div className="panel-title">
+        Interference computation · {p.dir}
+        <span className="t-right">
+          <span className="mono" style={{ fontSize: 10.5, color: 'var(--faint)', letterSpacing: 0 }}>
+            {done ? `computed in ${(CALC_MS / 1000 * 0.93).toFixed(2)} s` : <><span className="spinner" /> computing…</>}
+          </span>
+          <button className="btn btn-outline btn-sm" disabled={!done} onClick={() => setRunId((r) => r + 1)}>Re-run</button>
+        </span>
+      </div>
+
+      <div className="calc-grid">
+        <div className="calc-rows">
+          {rows.slice(0, shownRows).map((r) => (
+            <div key={`${runId}-${r.k}`} className="calc-row">
+              <div>
+                <div className="calc-k">{r.k}</div>
+                <div className="calc-eq mono">{r.eq}</div>
+              </div>
+              <div className={`calc-v mono${r.hot ? ' hot' : ''}`}>{r.v}</div>
+            </div>
+          ))}
+          {!done && shownRows < rows.length && (
+            <div className="calc-row pending"><span className="spinner" /> <span className="calc-eq mono">{rows[shownRows].k}…</span></div>
+          )}
+        </div>
+
+        <div className="calc-chart">
+          <div className="freq-row-label" style={{ marginBottom: 8 }}>I/N over one in-line pass</div>
+          <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label="I over N across the pass">
+            {[10, 0, -10, -20, -30, -40].map((v) => (
+              <g key={v}>
+                <line className="ch-grid" x1={pad.l} x2={W - pad.r} y1={y(v)} y2={y(v)} />
+                <text className="ch-lbl" x={pad.l - 6} y={y(v) + 3} textAnchor="end">{v}</text>
+              </g>
+            ))}
+            <line className="ch-thr soft" x1={pad.l} x2={W - pad.r} y1={y(-12.2)} y2={y(-12.2)} />
+            <text className="ch-lbl" x={W - pad.r} y={y(-12.2) + 11} textAnchor="end">−12.2 dB · ΔT/T 6 %</text>
+            <line className="ch-thr" x1={pad.l} x2={W - pad.r} y1={y(-6)} y2={y(-6)} />
+            <text className="ch-lbl hot" x={W - pad.r} y={y(-6) - 5} textAnchor="end">−6 dB short-term</text>
+            {prog > 0.35 && (
+              <>
+                <path className="ch-area" d={area} />
+                <path className="ch-line" d={path} />
+                {!done && <circle className="ch-head" cx={x(head.t)} cy={y(head.iN)} r="3" />}
+                {done && (
+                  <g>
+                    <circle className="ch-peak" cx={x(m.peak.t)} cy={y(m.peak.iN)} r="3.5" />
+                    <text className="ch-lbl hot" x={x(m.peak.t)} y={y(m.peak.iN) - 8} textAnchor="middle">
+                      {sign(m.peak.iN)}{m.peak.iN.toFixed(1)} dB
+                    </text>
+                  </g>
+                )}
+              </>
+            )}
+            {[0, p.pass / 2, p.pass].map((t) => (
+              <text key={t} className="ch-lbl" x={x(t)} y={H - 6} textAnchor={t === 0 ? 'start' : t === p.pass ? 'end' : 'middle'}>
+                {t === p.pass ? `${t} min` : `${t}`}
+              </text>
+            ))}
+          </svg>
+        </div>
+      </div>
+
+      {done && (
+        <div className={`calc-verdict${m.harmful && status !== 'Resolved' ? ' hot' : ''}`}>{verdict}</div>
+      )}
     </div>
   )
 }
@@ -975,10 +1372,15 @@ function InsuranceDetail({ showToast }) {
 
 function PostlaunchDetail({ go }) {
   const [reportState, setReportState] = useState('idle')
-  const generateReport = () => {
-    setReportState('generating')
-    setTimeout(() => setReportState('done'), 1900)
-  }
+  const generateReport = () => setReportState('generating')
+  const REPORT_STEPS = useMemo(() => [
+    { text: 'Pulling 184 days of RF telemetry from the MOC API', detail: '2.1 M frames · 5 spacecraft', ms: 700 },
+    { text: 'Cross-checking observed EIRP and uplink against the licence', detail: '1 excursion — AURORA-1D +0.8 dB', ms: 600 },
+    { text: 'Summarising conjunction events and manoeuvres (18 SDS)', detail: '3 screenings · 0 manoeuvres', ms: 520 },
+    { text: 'Recomputing disposal reserve and 5-year deorbit margin', detail: 'all SC ≥ 4.1 yr margin', ms: 480 },
+    { text: 'Drafting FCC semi-annual report §1–§6', detail: '12 pages · 0 fields left blank', ms: 640 },
+  ], [])
+  const onReportDone = useCallback(() => setReportState('done'), [])
   const inOrbit = SPACECRAFT.filter((s) => s.status === 'In orbit')
 
   return (
@@ -1038,7 +1440,10 @@ function PostlaunchDetail({ go }) {
         ))}
       </div>
 
-      {reportState === 'done' ? (
+      {reportState === 'generating' && (
+        <div className="panel"><AgentSteps title="Compiling semi-annual report" steps={REPORT_STEPS} onDone={onReportDone} /></div>
+      )}
+      {reportState === 'generating' ? null : reportState === 'done' ? (
         <div className="banner banner-green" style={{ marginBottom: 0 }}>
           <span>✓ Semi-annual report generated — queued for signature</span>
         </div>
@@ -1055,18 +1460,20 @@ function PostlaunchDetail({ go }) {
 /* Documents                                                           */
 /* ================================================================== */
 
-export function DocumentsView({ openModal, showToast }) {
+export function DocumentsView({ openModal, showToast, docs = DOCUMENTS }) {
   const [q, setQ] = useState('')
   const [type, setType] = useState('all')
 
-  const types = ['all', ...new Set(DOCUMENTS.map((d) => d.type))]
-  const rows = DOCUMENTS.filter((d) => {
+  const types = ['all', ...new Set(docs.map((d) => d.type))]
+  const rows = docs.filter((d) => {
     if (type !== 'all' && d.type !== type) return false
     const n = q.trim().toLowerCase()
     return !n || (d.name + d.mission + d.owner).toLowerCase().includes(n)
   })
 
-  const { sorted, sort, toggle } = useSort(rows, 'date', 'desc')
+  const { sorted: bySort, sort, toggle } = useSort(rows, 'date', 'desc')
+  /* anything generated this session stays pinned on top */
+  const sorted = [...bySort.filter((d) => d.isNew), ...bySort.filter((d) => !d.isNew)]
 
   return (
     <div className="view">
@@ -1082,7 +1489,7 @@ export function DocumentsView({ openModal, showToast }) {
         <select className="input" value={type} onChange={(e) => setType(e.target.value)}>
           {types.map((t) => <option key={t} value={t}>{t === 'all' ? 'All types' : t}</option>)}
         </select>
-        <span className="toolbar-count">{sorted.length} of {DOCUMENTS.length}</span>
+        <span className="toolbar-count">{sorted.length} of {docs.length}</span>
       </div>
 
       <div className="panel flush">
@@ -1102,7 +1509,10 @@ export function DocumentsView({ openModal, showToast }) {
           <tbody>
             {sorted.map((d) => (
               <tr key={d.id} className="rowlink" onClick={() => openModal({ type: 'doc', id: d.id })}>
-                <td className="name mono">{d.name}</td>
+                <td className="name mono">
+                  {d.name}
+                  {d.isNew && <span className="new-flag">New</span>}
+                </td>
                 <td className="muted">{d.type}</td>
                 <td className="muted">{d.mission}</td>
                 <td className="mono muted">{d.owner}</td>

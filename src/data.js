@@ -27,14 +27,66 @@ export const AUTHORITY_TRANSITION = {
 }
 
 export const EXTRACTED_FIELDS = [
-  { field: 'Orbit', value: '550 km SSO', confidence: 98 },
-  { field: 'Inclination', value: '97.59°', confidence: 99 },
-  { field: 'Uplink', value: '13.85–14.0 GHz', confidence: 97 },
-  { field: 'Downlink', value: '10.7–10.95 GHz', confidence: 98 },
-  { field: 'TT&C uplink', value: '2025–2110 MHz', confidence: 99 },
-  { field: 'EIRP', value: '42.3 dBW', confidence: 94 },
-  { field: 'Antenna gain', value: '34 dBi', confidence: 96 },
-  { field: 'GSD (nadir)', value: '0.82 m pan', confidence: 92 },
+  { field: 'Orbit', value: '550 km SSO', confidence: 98, source: 'Bus ICD · p.12 §3.1' },
+  { field: 'Inclination', value: '97.59°', confidence: 99, source: 'Bus ICD · p.12 §3.1' },
+  { field: 'Uplink', value: '13.85–14.0 GHz', confidence: 97, source: 'Frequency plan · p.4 T2' },
+  { field: 'Downlink', value: '10.7–10.95 GHz', confidence: 98, source: 'Frequency plan · p.4 T2' },
+  { field: 'TT&C uplink', value: '2025–2110 MHz', confidence: 99, source: 'Bus ICD · p.31 §6.2' },
+  { field: 'EIRP', value: '42.3 dBW', confidence: 94, source: 'Link budget · Ku_UL!C14' },
+  { field: 'Antenna gain', value: '34 dBi', confidence: 96, source: 'Link budget · Ku_UL!C9' },
+  { field: 'GSD (nadir)', value: '0.82 m pan', confidence: 92, source: 'Bus ICD · p.58 §9.4' },
+]
+
+/* the three documents "use sample documents" loads into the wizard */
+export const SAMPLE_FILES = [
+  { name: 'aurora1_bus_icd_rev_c.pdf', size: 4404019, pages: 84 },
+  { name: 'aurora1_frequency_plan_2026.docx', size: 1153434, pages: 22 },
+  { name: 'ku_link_budget_v7.xlsx', size: 319488, pages: 6 },
+]
+
+/* what the extraction log prints between hits, per document */
+export const SCAN_NOISE = [
+  'Table of contents — 14 sections indexed',
+  'Revision history — rev C supersedes rev B (Apr 2026)',
+  'Mass budget table — skipped, not a filing parameter',
+  'Power subsystem — solar array 96 W BOL',
+  'Figure 3-2 — ground track, OCR 99.1%',
+  'Thermal limits — skipped',
+  'Ground segment appendix — 5 stations referenced',
+  'Link margin summary — 4.6 dB clear-sky',
+]
+
+/* the rules engine, in the order it runs them */
+export const VALIDATION_CHECKS = [
+  { rule: '47 CFR §25.114(c)(4)', text: 'Orbital parameters complete and self-consistent', detail: 'a = 6928 km · e = 0.0011 · i = 97.59°' },
+  { rule: '47 CFR §25.114(d)(1)', text: 'Frequency bands inside FSS allocation', detail: '13.85–14.0 GHz ⊂ 13.75–14.5 GHz (Earth-to-space)' },
+  { rule: '47 CFR §25.204', text: 'Earth-station EIRP density limits', detail: '−1.8 dB margin to limit' },
+  { rule: 'RR App. 4 · A.4.b', text: 'Non-GSO orbit description', detail: '6 SC · 3 planes · phasing 60°' },
+  { rule: 'RR App. 4 · C.8', text: 'Maximum power density per carrier', detail: '−42.1 dBW/Hz' },
+  { rule: 'RR Art. 22 · Table 22-1B', text: 'EPFD↓ against GSO protection mask', detail: 'worst case −178.4 dBW/m² · margin 3.1 dB' },
+  { rule: '47 CFR §25.283', text: 'End-of-life disposal within 5 years', detail: '4.6 yr natural decay at 550 km' },
+  { rule: '15 CFR 960.6', text: 'Remote-sensing tier consistent with GSD', detail: '0.82 m → Tier 2' },
+  { rule: 'Cross-filing', text: 'Consistent with ITU API/A/12847 and SAT-LOA-00142', detail: '38 shared fields · 0 mismatches' },
+]
+
+/* interference model inputs per conflict — see interferenceModel() */
+export const INTERFERENCE = {
+  usasat: { dir: 'uplink', f: 13.96, eirp: 38, bwTheirs: 130, bwOurs: 150, slantKm: 1180, tsys: 700, gSat: 34, beam: 3.2, dish: 1.2, pass: 12, thetaMin: 0.35, rate: 1.3, eventsPerDay: 3.4 },
+  lightspeed: { dir: 'uplink', f: 13.875, eirp: 36, bwTheirs: 150, bwOurs: 150, slantKm: 1180, tsys: 700, gSat: 34, beam: 3.2, dish: 1.2, pass: 12, thetaMin: 1.1, rate: 1.5, eventsPerDay: 2.1 },
+  oneweb: { dir: 'downlink', f: 10.775, eirp: 30, bwTheirs: 150, bwOurs: 250, slantKm: 1180, tsys: 700, gSat: 34, beam: 3.2, dish: 0.9, pass: 12, thetaMin: 2.4, rate: 1.8, eventsPerDay: 5.2 },
+  o3b: { dir: 'uplink', f: 14.0, eirp: 40, bwTheirs: 500, bwOurs: 150, slantKm: 1180, tsys: 700, gSat: 34, beam: 3.2, dish: 1.2, pass: 12, thetaMin: 4.5, rate: 1.1, eventsPerDay: 1.2 },
+}
+
+/* background work the agent reports while the console is open */
+export const AGENT_TICKER = [
+  'Telemetry frame batch validated — 6 SC, EIRP within ±0.2 dB of last pass',
+  'Federal Register polled — 0 new documents matching 47 CFR 25 / 15 CFR 960',
+  'IFIC 3022 pre-publication index checked — no new Ku-band filings',
+  'Restricted-area tasking screen — 112 tasks cleared, 1 rejected and logged',
+  'Conjunction screen (18 SDS) — closest approach 4.1 km, AURORA-1B, no action',
+  'DDTC USML change log polled — no further Cat XV amendments',
+  'Underwriter data room checked — no new requests',
+  'FCC ELS docket SAT-MOD-20260708-00061 — 0 new comments',
 ]
 
 export const LETTER_V1 = `Attn: Spectrum Coordination Team
@@ -423,4 +475,63 @@ export function freqGeometry(ours, theirs) {
   const oLo = Math.max(ours[0], theirs[0])
   const oHi = Math.min(ours[1], theirs[1])
   return { pct, min, max: min + span, overlap: oHi > oLo ? [oLo, oHi] : null }
+}
+
+/* ---------------- interference model ---------------- */
+/* Single-entry I/N over one in-line pass. Earth-station pattern per    */
+/* ITU-R S.465/S.580, satellite receive pattern a parabolic main lobe   */
+/* with a 30 dB floor. Deterministic: same inputs, same curve.          */
+
+const lg = Math.log10
+
+function esGain(theta, dLambda) {
+  const gMax = 20 * lg(dLambda) + 7.7
+  const g1 = 2 + 15 * lg(dLambda)
+  const thM = (20 / dLambda) * Math.sqrt(gMax - g1)
+  const thR = 15.85 * dLambda ** -0.6
+  if (theta < thM) return gMax - 2.5e-3 * (dLambda * theta) ** 2
+  if (theta < thR) return g1
+  if (theta < 48) return 32 - 25 * lg(theta)
+  return -10
+}
+
+export function interferenceModel(conflict) {
+  const p = INTERFERENCE[conflict.id]
+  const lambda = 0.299792458 / p.f
+  const dLambda = p.dish / lambda
+  const gEs = 20 * lg(dLambda) + 7.7
+  const fspl = 92.45 + 20 * lg(p.slantKm) + 20 * lg(p.f)
+  const kTB = -228.6 + 10 * lg(p.tsys) + 10 * lg(p.bwOurs * 1e6)
+  const overlapFactor = 10 * lg(conflict.overlapMHz / p.bwTheirs)
+  const eirpInBand = p.eirp + overlapFactor
+
+  const samples = 121
+  const curve = []
+  let longTerm = 0
+  let shortTerm = 0
+  for (let i = 0; i < samples; i++) {
+    const t = (i / (samples - 1)) * p.pass
+    const theta = Math.hypot(p.thetaMin, p.rate * (t - p.pass / 2))
+    const gRx = Math.max(p.gSat - 12 * (theta / p.beam) ** 2, p.gSat - 30)
+    const i_dBW = eirpInBand - (gEs - esGain(theta, dLambda)) - fspl + gRx - 0.4
+    const iN = i_dBW - kTB
+    curve.push({ t, theta, iN })
+    if (iN > -12.2) longTerm++
+    if (iN > -6) shortTerm++
+  }
+  const peak = curve.reduce((a, c) => (c.iN > a.iN ? c : a))
+  const peakLin = 10 ** (peak.iN / 10)
+  const exceedMin = (shortTerm / samples) * p.pass
+  const dailyPct = ((exceedMin * p.eventsPerDay) / 1440) * 100
+
+  return {
+    p, fspl, kTB, gEs, overlapFactor, eirpInBand, curve, peak,
+    deltaTT: peakLin * 100,
+    cniLoss: 10 * lg(1 + peakLin),
+    longTermPct: (longTerm / samples) * 100,
+    shortTermPct: (shortTerm / samples) * 100,
+    exceedMin,
+    dailyPct,
+    harmful: dailyPct > 0.03,
+  }
 }

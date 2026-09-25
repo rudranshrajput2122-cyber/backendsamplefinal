@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Modal, SuccessBlock, Tag } from './ui.jsx'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Modal, SuccessBlock, Tag, AgentSteps, useTypewriter } from './ui.jsx'
 import { LETTER_V1, LETTER_V2, DEADLINE_DETAILS, AMENDMENTS, DOC_VERSIONS, ITAR_COMPONENTS } from './data.js'
 
 /* ------------------------------------------------------------------ */
@@ -9,19 +9,39 @@ import { LETTER_V1, LETTER_V2, DEADLINE_DETAILS, AMENDMENTS, DOC_VERSIONS, ITAR_
 export function LetterModal({ onClose, onSent }) {
   const [text, setText] = useState(LETTER_V1)
   const [version, setVersion] = useState(1)
-  const [regenerating, setRegenerating] = useState(false)
+  /* opening the modal (and every regenerate) runs a short retrieval
+     pass, then the draft streams in. The first pass keeps v1; each
+     regenerate after that flips to the other draft. */
+  const [regenerating, setRegenerating] = useState(true)
+  const [drafted, setDrafted] = useState(false)
   const [editing, setEditing] = useState(false)
   const [sent, setSent] = useState(false)
+  /* only a fresh draft streams; returning from Edit shows it whole */
+  const [fresh, setFresh] = useState(false)
+  const typing = useTypewriter(text, fresh, 6)
+  const streaming = !regenerating && fresh && !typing.done
 
   const regenerate = () => {
     setEditing(false)
     setRegenerating(true)
-    setTimeout(() => {
-      setText(version === 1 ? LETTER_V2 : LETTER_V1)
-      setVersion((v) => (v === 1 ? 2 : 1))
-      setRegenerating(false)
-    }, 1400)
   }
+
+  const contextSteps = useMemo(() => [
+    { text: 'Reading IFIC 3021 Part II-S — USASAT-NG 214 filing', detail: 'CR/C/3021-214 · 13.92–14.05 GHz', ms: 420 },
+    { text: 'Pulling interference analysis', detail: 'peak I/N +10.0 dB · 0.49 % of time over −6 dB', ms: 380 },
+    { text: 'Checking date priority and RR Art. 9.52 procedure', detail: 'AURORA-1 holds date priority', ms: 340 },
+    { text: drafted ? 'Redrafting in a different register' : 'Drafting letter', ms: 300 },
+  ], [drafted])
+
+  const onStepsDone = useCallback(() => {
+    if (drafted) {
+      setText((t) => (t === LETTER_V1 ? LETTER_V2 : LETTER_V1))
+      setVersion((v) => (v === 1 ? 2 : 1))
+    }
+    setDrafted(true)
+    setFresh(true)
+    setRegenerating(false)
+  }, [drafted])
 
   const send = () => {
     setSent(true)
@@ -44,31 +64,46 @@ export function LetterModal({ onClose, onSent }) {
       footer={
         <>
           <span className="left mono" style={{ fontSize: 11, color: 'var(--faint)' }}>
-            draft v{version} · RR Art. 9.52 · {text.length} chars
+            {regenerating
+              ? 'agent drafting…'
+              : streaming
+                ? `writing · ${typing.shown.length} / ${text.length} chars`
+                : `draft v${version} · RR Art. 9.52 · ${text.length} chars`}
           </span>
-          <button className="btn btn-outline" onClick={regenerate} disabled={regenerating}>
+          <button className="btn btn-outline" onClick={regenerate} disabled={regenerating || streaming}>
             {regenerating ? 'Regenerating…' : 'Regenerate'}
           </button>
-          <button className="btn btn-outline" onClick={() => setEditing((e) => !e)} disabled={regenerating}>
+          <button className="btn btn-outline" onClick={() => { setFresh(false); setEditing((e) => !e) }} disabled={regenerating || streaming}>
             {editing ? 'Preview' : 'Edit'}
           </button>
-          <button className="btn btn-primary" onClick={send} disabled={regenerating}>Send</button>
+          <button className="btn btn-primary" onClick={send} disabled={regenerating || streaming}>Send</button>
         </>
       }
     >
       {regenerating ? (
-        <div className="shimmer-lines">
-          {[92, 100, 96, 88, 100, 94, 78, 97, 90, 60].map((w, i) => (
-            <div key={i} className="shimmer-line" style={{ width: `${w}%` }} />
-          ))}
-        </div>
+        <AgentSteps title="Drafting coordination outreach" steps={contextSteps} onDone={onStepsDone} />
       ) : editing ? (
         <textarea className="letter-edit" value={text} onChange={(e) => setText(e.target.value)} autoFocus />
       ) : (
-        <div className="letter" key={version}>{text}</div>
+        <div
+          className="letter"
+          key={version}
+          onClick={() => setFresh(false)}
+          title={streaming ? 'Click to skip' : undefined}
+        >
+          {typing.shown}
+          {streaming && <span className="caret" />}
+          {fresh && typing.done && <StreamEnd onEnd={() => setFresh(false)} />}
+        </div>
       )}
     </Modal>
   )
+}
+
+/* flips `fresh` off once the stream has finished, outside render */
+function StreamEnd({ onEnd }) {
+  useEffect(() => { onEnd() }, [onEnd])
+  return null
 }
 
 /* ------------------------------------------------------------------ */
@@ -79,10 +114,15 @@ export function RuleChangeModal({ onClose, ruleReady, onGenerated }) {
   const [state, setState] = useState(ruleReady ? 'done' : 'idle')
   const affected = ITAR_COMPONENTS.filter((c) => c.affected)
 
-  const generate = () => {
-    setState('generating')
-    setTimeout(() => { setState('done'); onGenerated() }, 1800)
-  }
+  const generate = () => setState('generating')
+  const steps = useMemo(() => [
+    { text: 'Diffing USML Cat XV (Jul 14 final rule) against classification matrix v4', detail: '7 components compared', ms: 520 },
+    { text: 'Re-scoring jurisdiction per component', detail: '2 move EAR 9A515 → USML XV(e)', ms: 460 },
+    { text: 'Checking fundamental-research exclusion against revenue records', detail: 'commercial tasking revenue — FRE not available', ms: 420 },
+    { text: 'Drafting TAA-0912-26 amendment §3 (hardware) and §7 (technical data)', detail: '6 pages', ms: 560 },
+    { text: 'Routing package to university export-control officer', detail: 'a.whitfield notified', ms: 320 },
+  ], [])
+  const onDone = useCallback(() => { setState('done'); onGenerated() }, [onGenerated])
 
   return (
     <Modal
@@ -139,6 +179,10 @@ export function RuleChangeModal({ onClose, ruleReady, onGenerated }) {
         </div>
       </div>
 
+      {state === 'generating' && (
+        <div style={{ marginTop: 20 }}><AgentSteps title="Building classification package" steps={steps} onDone={onDone} /></div>
+      )}
+
       {state === 'done' && (
         <div className="success-block" style={{ padding: '16px 0 0' }}>
           <span className="tag tag-amber" style={{ fontSize: 12.5, padding: '7px 14px' }}>
@@ -159,10 +203,14 @@ export function AttestModal({ onClose, onSubmitted }) {
   const [state, setState] = useState('idle')
   const ready = checks.a && checks.b
 
-  const submit = () => {
-    setState('submitting')
-    setTimeout(() => { setState('done'); setTimeout(onSubmitted, 1100) }, 1600)
-  }
+  const submit = () => setState('submitting')
+  const steps = useMemo(() => [
+    { text: 'Signing attestations 4(a) and 7(b)', detail: 'PI signature · SHA-256 7c1e…04b2', ms: 420 },
+    { text: 'Serialising 49 fields to CRSRA report schema', detail: 'schema v2026.1 · valid', ms: 460 },
+    { text: 'Uploading to NOAA CRSRA portal', detail: '3.1 MB · TLS 1.3', ms: 620 },
+    { text: 'Waiting for receipt', detail: 'NOAA-CRSRA-2026-018-R1', ms: 520 },
+  ], [])
+  const onDone = useCallback(() => { setState('done'); setTimeout(onSubmitted, 1100) }, [onSubmitted])
 
   if (state === 'done') {
     return (
@@ -221,6 +269,10 @@ export function AttestModal({ onClose, onSubmitted }) {
           />
         </div>
       ))}
+
+      {state === 'submitting' && (
+        <div style={{ marginTop: 20 }}><AgentSteps title="Submitting to NOAA" steps={steps} onDone={onDone} /></div>
+      )}
 
       {!ready && (
         <div style={{ fontSize: 11.5, color: 'var(--a1)', marginTop: 12 }}>
@@ -370,10 +422,14 @@ export function VersionsModal({ doc, onClose, showToast }) {
 export function ImpactModal({ entry, onClose, go }) {
   const [state, setState] = useState('idle')
 
-  const generate = () => {
-    setState('generating')
-    setTimeout(() => setState('done'), 1800)
-  }
+  const generate = () => setState('generating')
+  const steps = useMemo(() => [
+    { text: `Parsing ${entry.source} publication — ${entry.title}`, detail: 'full text + effective dates extracted', ms: 460 },
+    { text: 'Matching against 12 filings and 6 compliance modules', detail: 'affected items identified', ms: 520 },
+    { text: 'Drafting changes to affected filings', detail: entry.action, ms: 600 },
+    { text: 'Scheduling new obligations and owners', ms: 360 },
+  ], [entry])
+  const onDone = useCallback(() => setState('done'), [])
 
   return (
     <Modal
@@ -411,6 +467,9 @@ export function ImpactModal({ entry, onClose, go }) {
         <div className="detail-label">Action needed</div>
         <div className="detail-text">{entry.action}</div>
       </div>
+      {state === 'generating' && (
+        <div style={{ marginTop: 20 }}><AgentSteps title="Impact analysis" steps={steps} onDone={onDone} /></div>
+      )}
       {state === 'done' && (
         <div className="success-block" style={{ padding: '16px 0 0' }}>
           <span className="tag tag-amber" style={{ fontSize: 12.5, padding: '7px 14px' }}>

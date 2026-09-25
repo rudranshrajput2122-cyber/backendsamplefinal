@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   FILINGS, DOCUMENTS, FEED, CONFLICTS, SPACECRAFT, MODULES, OPERATOR, AUTHORITY_TRANSITION,
+  ACTIVITY, AGENT_TICKER,
 } from './data.js'
 import {
   LetterModal, RuleChangeModal, DeadlineModal, AmendmentsModal,
@@ -48,6 +49,11 @@ const SECTION_OF = {
   settings: 'settings',
 }
 
+const utcStamp = () => {
+  const d = new Date()
+  return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}Z`
+}
+
 const INITIAL_DEADLINES = [
   { id: 'telesat', title: 'ITU coordination response — Telesat', sub: 'Silence is treated as agreement · IFIC 3021', days: 6, owner: 'j.okafor' },
   { id: 'noaa', title: 'NOAA CRSRA annual report', sub: '47 of 49 fields filled · two attestations open', days: 11, owner: 'a.whitfield' },
@@ -65,7 +71,9 @@ export default function App() {
   const toastTimer = useRef(null)
 
   /* persistent demo state — every action leaves a visible trace */
-  const [filingGenerated, setFilingGenerated] = useState(false)
+  const [generatedDocs, setGeneratedDocs] = useState([])
+  const filingGenerated = generatedDocs.length > 0
+  const [activity, setActivity] = useState(() => ACTIVITY.map((a, i) => ({ ...a, id: `seed-${i}` })))
   const [usasatStatus, setUsasatStatus] = useState('Open')
   const [ruleReady, setRuleReady] = useState(false)
   const [noaaSigned, setNoaaSigned] = useState(false)
@@ -82,6 +90,30 @@ export default function App() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [])
+
+  /* every action — agent or human — lands in the activity log */
+  const logActivity = useCallback((text, who = 'Kolhar agent', kind = 'agent') => {
+    setActivity((a) => [
+      { id: `${Date.now()}-${Math.random()}`, t: utcStamp(), who, text, kind, fresh: true },
+      ...a.map((x) => (x.fresh ? { ...x, fresh: false } : x)),
+    ].slice(0, 40))
+  }, [])
+
+  /* the agent keeps working in the background while the console is open */
+  useEffect(() => {
+    let n = 0
+    const t = setInterval(() => {
+      logActivity(AGENT_TICKER[n++ % AGENT_TICKER.length])
+    }, 11000)
+    return () => clearInterval(t)
+  }, [logActivity])
+
+  const onFilingGenerated = useCallback((doc) => {
+    setGeneratedDocs((ds) => [doc, ...ds.filter((d) => d.id !== doc.id)])
+    logActivity(`Generated ${doc.name} — all validation checks passed`)
+  }, [logActivity])
+
+  const allDocs = useMemo(() => [...generatedDocs, ...DOCUMENTS], [generatedDocs])
 
   useEffect(() => {
     if (!missionOpen) return
@@ -136,6 +168,7 @@ export default function App() {
     )
     closeModal()
     showToast('Letter sent to Telesat')
+    logActivity('Sent coordination letter to Telesat — RR Art. 9.52, 6-day window tracked', 'j.okafor', 'human')
   }
 
   const onAttested = () => {
@@ -149,6 +182,7 @@ export default function App() {
     )
     closeModal()
     showToast('Report submitted')
+    logActivity('Submitted NOAA CRSRA annual report — receipt NOAA-CRSRA-2026-018-R1', 'a.whitfield', 'human')
   }
 
   const openConflicts = CONFLICTS.filter(
@@ -196,6 +230,7 @@ export default function App() {
           ))}
 
           <div className="side-foot">
+            <AgentStatus syncedAt={activity[0]?.id} />
             {OPERATOR.name}<br />
             FRN {OPERATOR.frn}
           </div>
@@ -242,10 +277,10 @@ export default function App() {
           </div>
 
           {route.view === 'dashboard' && (
-            <Dashboard deadlines={deadlines} filingGenerated={filingGenerated} {...shared} />
+            <Dashboard deadlines={deadlines} filingGenerated={filingGenerated} activity={activity} {...shared} />
           )}
           {route.view === 'wizard' && (
-            <FilingWizard onExit={() => go('dashboard')} onGenerated={() => setFilingGenerated(true)} showToast={showToast} />
+            <FilingWizard onExit={() => go('dashboard')} onGenerated={onFilingGenerated} showToast={showToast} />
           )}
           {route.view === 'filings' && <FilingsView {...shared} />}
           {route.view === 'filingDetail' && <FilingDetail id={route.id} {...shared} />}
@@ -253,7 +288,7 @@ export default function App() {
           {route.view === 'conflictDetail' && <ConflictDetail id={route.id} {...shared} />}
           {route.view === 'modules' && <ModulesView {...shared} />}
           {route.view === 'moduleDetail' && <ModuleDetail id={route.id} {...shared} />}
-          {route.view === 'documents' && <DocumentsView {...shared} />}
+          {route.view === 'documents' && <DocumentsView docs={allDocs} {...shared} />}
           {route.view === 'feed' && <FeedView {...shared} />}
           {route.view === 'spacecraft' && <SpacecraftDetail id={route.id} {...shared} />}
           {route.view === 'settings' && <SettingsView showToast={showToast} />}
@@ -262,7 +297,11 @@ export default function App() {
 
       {modal === 'letter' && <LetterModal onClose={closeModal} onSent={onLetterSent} />}
       {modal === 'rule' && (
-        <RuleChangeModal onClose={closeModal} ruleReady={ruleReady} onGenerated={() => setRuleReady(true)} />
+        <RuleChangeModal
+          onClose={closeModal}
+          ruleReady={ruleReady}
+          onGenerated={() => { setRuleReady(true); logActivity('Drafted TAA-0912-26 amendment and updated classification matrix v5') }}
+        />
       )}
       {modal === 'attest' && <AttestModal onClose={closeModal} onSubmitted={onAttested} />}
       {modal?.type === 'deadline' && (
@@ -279,14 +318,14 @@ export default function App() {
       )}
       {modal?.type === 'doc' && (
         <DocPreviewModal
-          doc={DOCUMENTS.find((d) => d.id === modal.id)}
+          doc={allDocs.find((d) => d.id === modal.id)}
           onClose={closeModal}
           onDownload={() => { showToast('Download started'); closeModal() }}
           onVersions={() => setModal({ type: 'versions', id: modal.id })}
         />
       )}
       {modal?.type === 'versions' && (
-        <VersionsModal doc={DOCUMENTS.find((d) => d.id === modal.id)} onClose={closeModal} showToast={showToast} />
+        <VersionsModal doc={allDocs.find((d) => d.id === modal.id)} onClose={closeModal} showToast={showToast} />
       )}
       {modal?.type === 'impact' && (
         <ImpactModal entry={FEED.find((e) => e.id === modal.id)} onClose={closeModal} go={go} />
@@ -300,6 +339,23 @@ export default function App() {
         </div>
       )}
     </>
+  )
+}
+
+/* sidebar heartbeat — owns its own one-second tick so the rest of the
+   app doesn't re-render with it; resets whenever the log gains a row */
+function AgentStatus({ syncedAt }) {
+  const [secs, setSecs] = useState(0)
+  useEffect(() => {
+    setSecs(0)
+    const t = setInterval(() => setSecs((x) => x + 1), 1000)
+    return () => clearInterval(t)
+  }, [syncedAt])
+  return (
+    <div className="agent-status">
+      <span className="live-dot" />
+      Agent online · {secs}s ago
+    </div>
   )
 }
 
